@@ -1,0 +1,49 @@
+name: YouTube Bale Ghost Downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      chat_id:
+        description: 'Bale User Chat ID'
+        required: true
+        type: string
+      youtube_url:
+        description: 'Target YouTube Video URL'
+        required: true
+        type: string
+
+jobs:
+  extract_and_send:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: 🐍 Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          
+      - name: 🛠️ Install System Dependencies (FFmpeg)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          
+      - name: 📦 Install Python Packages
+        # فایل requirements.txt باید شامل requests و playwright باشد
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          
+      - name: 🌐 Install Playwright Chromium (Ghost Browser)
+        run: |
+          playwright install chromium
+          
+      - name: 🚀 Run Bot Interface
+        # توکن بله باید در بخش Secrets مخزن گیت‌هاب ثبت شده باشد
+        env:
+          BALE_TOKEN: ${{ secrets.BALE_TOKEN }}
+        run: |
+          python bale_interface.py "${{ github.event.inputs.chat_id }}" "${{ github.event.inputs.youtube_url }}"
+          
