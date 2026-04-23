@@ -33,4 +33,3 @@ jobs:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
         run: |
           python bot.py
-          
