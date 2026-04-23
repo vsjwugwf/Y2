@@ -1,0 +1,39 @@
+name: bale-crawler-bot
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    # حداکثر زمان مجاز
+    timeout-minutes: 355
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install playwright requests beautifulsoup4
+          playwright install chromium
+
+      - name: Run bot
+        run: |
+          python bot.py &
+          BOT_PID=$!
+
+          # 5 ساعت و 55 دقیقه
+          sleep 21300
+
+          echo "Stopping bot before GitHub limit"
+          kill $BOT_PID || true
+          
