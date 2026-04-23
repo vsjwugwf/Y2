@@ -8,7 +8,7 @@ from playwright.sync_api import sync_playwright
 # -----------------------------
 # تنظیمات ربات بله
 # -----------------------------
-BOT_TOKEN = "427718610:i79QB6avOiOAygLqy3e9GO3JXTJOttkWRvw"
+BOT_TOKEN = "2113073642:47v_F7qGUGXaH8aFvXjBNCtGIAuHpyZbdYI"
 BASE_URL = f"https://tapi.bale.ai/bot{BOT_TOKEN}/"
 
 def send_message(chat_id, text):
