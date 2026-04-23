@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ربات بله – مرورگر تعاملی، دانلودر هوشمند و اسکرین‌شات حرفه‌ای
-متصل به Tack Server (LLAN / LLAN)
+ربات بله – مرورگر تعاملی، دانلودر هوشمند، اسکرین‌شات 4K
+با سیستم اشتراک پرو (۵ کد)
+نسخه‌ی سبک و سریع – ذخیره‌سازی محلی
 """
 
-import os, sys, json, time, math, queue, shutil, zipfile, hashlib, uuid
+import os, sys, json, time, math, queue, shutil, zipfile, uuid
 import threading, traceback
 from dataclasses import dataclass, asdict
 from typing import Dict, Any, Optional, List, Tuple
@@ -29,11 +30,8 @@ LONG_POLL_TIMEOUT = 50
 WORKER_COUNT = 3
 ZIP_PART_SIZE = int(19.5 * 1024 * 1024)
 
-TACK_SERVER = "https://tk-server.ir"
-TACK_USER = "LLAN"
-TACK_PASS = "LLAN"
-TACK_EDIT_URL = f"{TACK_SERVER}/json/edit.php"
-TACK_GET_URL_PREFIX = f"{TACK_SERVER}/json/"
+# ۵ کد ثابت اشتراک پرو
+PRO_CODES = ["PRO2024A", "PRO2024B", "PRO2024C", "PRO2024D", "PRO2024E"]
 
 # قفل‌ها
 print_lock = threading.Lock()
@@ -54,25 +52,24 @@ def safe_print(*args, **kwargs):
 @dataclass
 class SessionState:
     chat_id: int
-    state: str = "idle"
+    state: str = "idle"                     # idle, waiting_url_screenshot, ...
+    is_pro: bool = False                    # اشتراک ویژه
     current_job_id: Optional[str] = None
     browser_url: Optional[str] = None
     last_interaction: float = time.time()
     cancel_requested: bool = False
 
-
 @dataclass
 class Job:
     job_id: str
     chat_id: int
-    mode: str
+    mode: str                               # screenshot, download, browser, browser_click, 4k_screenshot, download_execute
     url: str
     status: str = "queued"
     created_at: float = time.time()
     updated_at: float = time.time()
     error_message: Optional[str] = None
     extra: Optional[Dict[str, Any]] = None
-
 
 @dataclass
 class WorkerInfo:
@@ -82,43 +79,39 @@ class WorkerInfo:
 
 
 # ════════════════════════════════════
-# TackServerDB (اتصال به سرور JSON)
+# ذخیره‌سازی محلی Sessionها
 # ════════════════════════════════════
-class TackServerDB:
+SESSIONS_FILE = "sessions.json"
 
-    @staticmethod
-    def _make_key(chat_id: int) -> str:
-        return f"{TACK_USER}-{chat_id}"
+def load_sessions() -> Dict[str, Any]:
+    try:
+        with open(SESSIONS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return {}
 
-    @staticmethod
-    def save_session(session: SessionState) -> bool:
-        key = TackServerDB._make_key(session.chat_id)
-        payload = {
-            "name": key,
-            "pass": TACK_PASS,
-            "data": json.dumps(asdict(session), ensure_ascii=False)
-        }
-        try:
-            resp = requests.post(TACK_EDIT_URL, data=payload, timeout=15)
-            return resp.status_code == 200 and resp.json().get("ok", False)
-        except Exception as e:
-            safe_print(f"TackServerDB save error: {e}")
-            return False
+def save_sessions(data: Dict[str, Any]):
+    tmp = SESSIONS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, SESSIONS_FILE)
 
-    @staticmethod
-    def load_session(chat_id: int) -> Optional[SessionState]:
-        key = TackServerDB._make_key(chat_id)
-        url = f"{TACK_GET_URL_PREFIX}{key}.json"
-        try:
-            resp = requests.get(url, timeout=15)
-            if resp.status_code != 200:
-                return None
-            data = resp.json()
-            if not data or isinstance(data, list):
-                return None
-            return SessionState(**data)
-        except:
-            return None
+def get_session(chat_id: int) -> SessionState:
+    data = load_sessions()
+    key = str(chat_id)
+    if key in data:
+        return SessionState(**data[key])
+    return SessionState(chat_id=chat_id)
+
+def set_session(session: SessionState):
+    data = load_sessions()
+    data[str(session.chat_id)] = asdict(session)
+    save_sessions(data)
+
+def is_pro(chat_id: int) -> bool:
+    return get_session(chat_id).is_pro
+
+
 # ════════════════════════════════════
 # ابزارهای API بله
 # ════════════════════════════════════
@@ -141,13 +134,11 @@ def bale_request(method: str, params: Optional[Dict] = None, files=None) -> Any:
         safe_print(f"Exception in bale_request {method}: {e}")
         return None
 
-
 def send_message(chat_id: int, text: str, reply_markup=None):
     params = {"chat_id": chat_id, "text": text}
     if reply_markup:
         params["reply_markup"] = json.dumps(reply_markup)
     return bale_request("sendMessage", params=params)
-
 
 def send_document(chat_id: int, file_path: str, caption: str = ""):
     with open(file_path, "rb") as f:
@@ -156,7 +147,6 @@ def send_document(chat_id: int, file_path: str, caption: str = ""):
         if caption:
             params["caption"] = caption
         return bale_request("sendDocument", params=params, files=files)
-
 
 def send_photo(chat_id: int, file_path: str, caption: str = "", reply_markup=None):
     with open(file_path, "rb") as f:
@@ -168,7 +158,6 @@ def send_photo(chat_id: int, file_path: str, caption: str = "", reply_markup=Non
             params["reply_markup"] = json.dumps(reply_markup)
         return bale_request("sendPhoto", params=params, files=files)
 
-
 def answer_callback_query(cq_id: str, text: str = "", show_alert: bool = False):
     params = {"callback_query_id": cq_id}
     if text:
@@ -176,7 +165,6 @@ def answer_callback_query(cq_id: str, text: str = "", show_alert: bool = False):
     if show_alert:
         params["show_alert"] = True
     return bale_request("answerCallbackQuery", params=params)
-
 
 def get_updates(offset=None, timeout=LONG_POLL_TIMEOUT) -> List[Dict]:
     params = {"timeout": timeout}
@@ -189,7 +177,7 @@ def get_updates(offset=None, timeout=LONG_POLL_TIMEOUT) -> List[Dict]:
 
 
 # ════════════════════════════════════
-# منوهای شیشه‌ای
+# منوها
 # ════════════════════════════════════
 def main_menu_keyboard():
     return {
@@ -200,7 +188,6 @@ def main_menu_keyboard():
             [{"text": "❌ لغو / تنظیم مجدد", "callback_data": "menu_cancel"}]
         ]
     }
-
 
 def page_actions_keyboard(urls: List[Tuple[str, str]], chat_id: int) -> Dict[str, Any]:
     keyboard_rows = []
@@ -215,24 +202,18 @@ def page_actions_keyboard(urls: List[Tuple[str, str]], chat_id: int) -> Dict[str
 
 
 # ════════════════════════════════════
-# Playwright – راه‌اندازی و Context
+# Playwright
 # ════════════════════════════════════
 browser_contexts: Dict[str, Any] = {}
 browser_contexts_lock = threading.Lock()
-
 
 def setup_browser():
     playwright = sync_playwright().start()
     browser = playwright.chromium.launch(
         headless=True,
-        args=[
-            "--no-sandbox", "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage", "--disable-gpu",
-            "--no-zygote", "--disable-web-security",
-        ]
+        args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--no-zygote"]
     )
     return playwright, browser
-
 
 def get_or_create_context(chat_id: int):
     ctx_key = str(chat_id)
@@ -247,20 +228,9 @@ def get_or_create_context(chat_id: int):
             except:
                 pass
         pw, browser = setup_browser()
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 720},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/120.0.0.0 Safari/537.36"
-        )
-        browser_contexts[ctx_key] = {
-            "context": context,
-            "playwright": pw,
-            "browser": browser,
-            "last_used": time.time()
-        }
+        context = browser.new_context(viewport={"width": 1280, "height": 720})
+        browser_contexts[ctx_key] = {"context": context, "playwright": pw, "browser": browser, "last_used": time.time()}
         return context
-
 
 def close_user_context(chat_id: int):
     ctx_key = str(chat_id)
@@ -279,187 +249,145 @@ def close_user_context(chat_id: int):
             existing["playwright"].stop()
         except:
             pass
+
+
 # ════════════════════════════════════
-# ابزارهای استخراج صفحه
+# ابزارهای استخراج صفحه و فایل
 # ════════════════════════════════════
 def extract_clickable_links(page) -> List[Tuple[str, str]]:
     links = page.evaluate("""
         () => {
-            const results = [];
-            const anchors = document.querySelectorAll('a[href]');
-            for (const a of anchors) {
+            const res = [];
+            document.querySelectorAll('a[href]').forEach(a => {
                 const text = (a.textContent || '').trim().substring(0, 30);
-                if (text && a.href) results.push([text, a.href]);
-            }
-            const unique = [];
+                if (text && a.href) res.push([text, a.href]);
+            });
+            // حذف تکراری
             const seen = new Set();
-            for (const [text, href] of results) {
-                if (!seen.has(href)) {
-                    seen.add(href);
-                    unique.push([text, href]);
-                }
+            const unique = [];
+            for (const [t,h] of res) {
+                if (!seen.has(h)) { seen.add(h); unique.push([t,h]); }
             }
             return unique.slice(0, 80);
         }
     """)
     return [(item[0], item[1]) for item in links]
 
-
 def is_direct_file_url(url: str) -> bool:
-    file_extensions = ['.zip', '.rar', '.7z', '.pdf', '.mp4', '.mkv', '.avi',
-                       '.mp3', '.exe', '.apk', '.dmg', '.iso', '.tar', '.gz', '.bz2', '.xz']
+    exts = ['.zip','.rar','.7z','.pdf','.mp4','.mkv','.avi','.mp3','.exe','.apk','.dmg','.iso','.tar','.gz','.bz2','.xz']
     path = urlparse(url).path.lower()
-    return any(path.endswith(ext) for ext in file_extensions)
-
+    return any(path.endswith(e) for e in exts)
 
 def get_filename_from_url(url: str) -> str:
     path = unquote(urlparse(url).path)
     name = os.path.basename(path)
-    if not name or '.' not in name:
-        name = "downloaded_file"
-    return name
+    return name if (name and '.' in name) else "downloaded_file"
 
-
-# ════════════════════════════════════
-# خزنده برای یافتن لینک دانلود
-# ════════════════════════════════════
-def crawl_for_download_link(start_url: str, max_depth: int = 1, max_pages: int = 10) -> Optional[str]:
+def crawl_for_download_link(start_url: str) -> Optional[str]:
     visited = set()
     to_visit = queue.Queue()
     to_visit.put((start_url, 0))
     session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                      "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    })
-
-    page_count = 0
+    session.headers.update({"User-Agent": "Mozilla/5.0"})
+    pc = 0
     while not to_visit.empty():
         url_cur, depth = to_visit.get()
-        if url_cur in visited:
-            continue
-        if depth > max_depth or page_count > max_pages:
-            break
-        visited.add(url_cur)
-        page_count += 1
+        if url_cur in visited or depth > 1 or pc > 10: break
+        visited.add(url_cur); pc += 1
         try:
-            resp = session.get(url_cur, timeout=15)
-        except:
-            continue
-        if resp.status_code != 200:
-            continue
-
-        if is_direct_file_url(url_cur):
-            return url_cur
-
-        if "text/html" in resp.headers.get("Content-Type", ""):
-            soup = BeautifulSoup(resp.text, "html.parser")
+            r = session.get(url_cur, timeout=10)
+        except: continue
+        if is_direct_file_url(url_cur): return url_cur
+        if "text/html" in r.headers.get("Content-Type", ""):
+            soup = BeautifulSoup(r.text, "html.parser")
             for a in soup.find_all("a", href=True):
                 href = urljoin(url_cur, a["href"])
-                if is_direct_file_url(href):
-                    return href
-                if depth + 1 <= max_depth:
-                    p = urlparse(href)
-                    if p.netloc == urlparse(url_cur).netloc:
-                        to_visit.put((href, depth + 1))
+                if is_direct_file_url(href): return href
+                to_visit.put((href, depth+1))
     return None
 
-
-# ════════════════════════════════════
-# تقسیم فایل (اسپلیت)
-# ════════════════════════════════════
-def split_file_binary(file_path: str, part_prefix: str, original_ext: str) -> List[str]:
-    dir_name = os.path.dirname(file_path) or "."
-    part_paths = []
-
+# تقسیم فایل
+def split_file_binary(file_path: str, prefix: str, ext: str) -> List[str]:
+    d = os.path.dirname(file_path) or "."
+    parts = []
     with open(file_path, "rb") as f:
-        part_index = 1
+        i = 1
         while True:
             chunk = f.read(ZIP_PART_SIZE)
-            if not chunk:
-                break
-            part_name = f"{part_prefix}.part{part_index:03d}{original_ext}"
-            part_path = os.path.join(dir_name, part_name)
-            with open(part_path, "wb") as pf:
-                pf.write(chunk)
-            part_paths.append(part_path)
-            part_index += 1
-
-    return part_paths
-
-
-def create_zip_and_split(source_path: str, base_name: str) -> List[str]:
-    dir_name = os.path.dirname(source_path) or "."
-    zip_name = f"{base_name}.zip"
-    zip_path = os.path.join(dir_name, zip_name)
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.write(source_path, arcname=os.path.basename(source_path))
-
-    if os.path.getsize(zip_path) <= ZIP_PART_SIZE:
-        return [zip_path]
-    parts = split_file_binary(zip_path, base_name, ".zip")
-    os.remove(zip_path)
+            if not chunk: break
+            pname = f"{prefix}.part{i:03d}{ext}"
+            ppath = os.path.join(d, pname)
+            with open(ppath, "wb") as pf: pf.write(chunk)
+            parts.append(ppath)
+            i += 1
     return parts
 
+def create_zip_and_split(src: str, base: str) -> List[str]:
+    d = os.path.dirname(src) or "."
+    zp = os.path.join(d, f"{base}.zip")
+    with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.write(src, os.path.basename(src))
+    if os.path.getsize(zp) <= ZIP_PART_SIZE: return [zp]
+    parts = split_file_binary(zp, base, ".zip")
+    os.remove(zp)
+    return parts
 
-# ════════════════════════════════════
-# اسکرین‌شات‌ها
-# ════════════════════════════════════
-def take_screenshot_fullpage(context, url: str, out_path: str):
+# اسکرین‌شات
+def screenshot_full(context, url, out): 
     page = context.new_page()
     try:
         page.goto(url, timeout=90000, wait_until="networkidle")
         page.wait_for_timeout(2000)
-        page.screenshot(path=out_path, full_page=True)
-    finally:
-        page.close()
+        page.screenshot(path=out, full_page=True)
+    finally: page.close()
 
-
-def take_screenshot_4k(context, url: str, out_path: str):
+def screenshot_4k(context, url, out):
     page = context.new_page()
     try:
         page.set_viewport_size({"width": 3840, "height": 2160})
         page.goto(url, timeout=90000, wait_until="networkidle")
         page.wait_for_timeout(3000)
-        page.screenshot(path=out_path, full_page=True)
-    finally:
-        page.close()
+        page.screenshot(path=out, full_page=True)
+    finally: page.close()
+
+
 # ════════════════════════════════════
-# مدیریت صف جاب‌ها
+# مدیریت صف و Worker
 # ════════════════════════════════════
 QUEUE_FILE = "queue.json"
 
+def load_queue(): 
+    try: 
+        with open(QUEUE_FILE, "r") as f: return json.load(f)
+    except: return []
 
-def load_queue() -> List[Dict]:
-    try:
-        with open(QUEUE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except:
-        return []
-
-
-def save_queue(data: List[Dict]):
-    tmp = QUEUE_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def save_queue(data): 
+    tmp = QUEUE_FILE+".tmp"
+    with open(tmp, "w") as f: json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, QUEUE_FILE)
 
-
-def enqueue_job(job: Job):
+def enqueue(job: Job):
     with queue_lock:
         q = load_queue()
         q.append(asdict(job))
         save_queue(q)
 
-
-def find_job_by_id(job_id: str) -> Optional[Job]:
+def pop_queued() -> Optional[Job]:
     with queue_lock:
         q = load_queue()
-        for item in q:
-            if item["job_id"] == job_id:
-                return Job(**item)
+        for i, item in enumerate(q):
+            if item["status"] == "queued":
+                job = Job(**item)
+                q[i]["status"] = "running"
+                save_queue(q)
+                return job
     return None
 
+def find_job(job_id: str) -> Optional[Job]:
+    q = load_queue()
+    for item in q:
+        if item["job_id"] == job_id: return Job(**item)
+    return None
 
 def update_job(job: Job):
     with queue_lock:
@@ -472,566 +400,348 @@ def update_job(job: Job):
         q.append(asdict(job))
         save_queue(q)
 
+def job_queue_position(job_id: str) -> int:
+    q = load_queue()
+    pos = 1
+    for item in q:
+        if item["status"] == "queued":
+            if item["job_id"] == job_id: return pos
+            pos += 1
+    return -1
 
-def pop_next_queued_job() -> Optional[Job]:
-    with queue_lock:
-        q = load_queue()
-        for i, item in enumerate(q):
-            if item["status"] == "queued":
-                job = Job(**item)
-                q[i]["status"] = "running"
-                q[i]["updated_at"] = time.time()
-                save_queue(q)
-                return job
-    return None
-
-
-def get_job_queue_position(job_id: str) -> Optional[int]:
-    with queue_lock:
-        q = load_queue()
-        pos = 1
-        for item in q:
-            if item["status"] == "queued":
-                if item["job_id"] == job_id:
-                    return pos
-                pos += 1
-    return None
-
-
-# ════════════════════════════════════
-# مدیریت Workerها
-# ════════════════════════════════════
+# Workers
 WORKERS_FILE = "workers.json"
-
-
-def load_workers() -> List[Dict]:
-    try:
-        with open(WORKERS_FILE, "r") as f:
-            return json.load(f)
+def load_workers(): 
+    try: 
+        with open(WORKERS_FILE) as f: return json.load(f)
     except:
-        workers = []
-        for i in range(WORKER_COUNT):
-            workers.append(asdict(WorkerInfo(worker_id=i)))
-        return workers
-
-
-def save_workers(data: List[Dict]):
-    tmp = WORKERS_FILE + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+        return [asdict(WorkerInfo(i)) for i in range(WORKER_COUNT)]
+def save_workers(data): 
+    tmp = WORKERS_FILE+".tmp"
+    with open(tmp, "w") as f: json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, WORKERS_FILE)
 
-
-def find_idle_worker() -> Optional[WorkerInfo]:
+def find_idle_worker():
     with workers_lock:
-        workers = load_workers()
-        for w in workers:
-            if w["status"] == "idle":
-                return WorkerInfo(**w)
+        wlist = load_workers()
+        for w in wlist:
+            if w["status"] == "idle": return WorkerInfo(**w)
     return None
-
-
-def set_worker_busy(worker_id: int, job_id: str):
+def set_worker_busy(wid, jid):
     with workers_lock:
-        workers = load_workers()
-        for w in workers:
-            if w["worker_id"] == worker_id:
-                w["status"] = "busy"
-                w["current_job_id"] = job_id
-                break
-        save_workers(workers)
-
-
-def set_worker_idle(worker_id: int):
+        wlist = load_workers()
+        for w in wlist:
+            if w["worker_id"] == wid:
+                w["status"] = "busy"; w["current_job_id"] = jid
+        save_workers(wlist)
+def set_worker_idle(wid):
     with workers_lock:
-        workers = load_workers()
-        for w in workers:
-            if w["worker_id"] == worker_id:
-                w["status"] = "idle"
-                w["current_job_id"] = None
-                break
-        save_workers(workers)
+        wlist = load_workers()
+        for w in wlist:
+            if w["worker_id"] == wid:
+                w["status"] = "idle"; w["current_job_id"] = None
+        save_workers(wlist)
 
-
-# ════════════════════════════════════
-# حلقهٔ Worker
-# ════════════════════════════════════
 def worker_loop(worker_id: int, stop_event: threading.Event):
-    safe_print(f"[Worker {worker_id}] شروع به کار")
+    safe_print(f"[Worker {worker_id}] start")
     while not stop_event.is_set():
-        idle_worker = find_idle_worker()
-        if idle_worker and idle_worker.worker_id == worker_id:
-            job = pop_next_queued_job()
-            if job is None:
-                time.sleep(2)
-                continue
+        if find_idle_worker() and find_idle_worker().worker_id == worker_id:
+            job = pop_queued()
+            if not job:
+                time.sleep(2); continue
             set_worker_busy(worker_id, job.job_id)
-            safe_print(f"[Worker {worker_id}] پردازش job {job.job_id}")
             try:
                 process_job(worker_id, job)
             except Exception as e:
-                safe_print(f"[Worker {worker_id}] خطای بحرانی: {e}")
+                safe_print(f"Worker {worker_id} error: {e}")
                 traceback.print_exc()
             finally:
                 set_worker_idle(worker_id)
         else:
             time.sleep(2)
-    safe_print(f"[Worker {worker_id}] متوقف شد")
 
 
 # ════════════════════════════════════
-# هستهٔ پردازش Job (نسخهٔ اصلاح‌شده)
+# هستهٔ پردازش Job
 # ════════════════════════════════════
-def process_job(worker_id: int, job: Job):
+def process_job(worker_id, job: Job):
     chat_id = job.chat_id
-    session = TackServerDB.load_session(chat_id) or SessionState(chat_id=chat_id)
+    session = get_session(chat_id)
 
-    # اگر این job یک زیر-عملیات دانلود واقعی است
     if job.mode == "download_execute":
         job_dir = os.path.join("jobs_data", job.job_id)
         os.makedirs(job_dir, exist_ok=True)
         try:
             execute_download(job, job_dir)
         except Exception as e:
-            safe_print(f"download_execute error: {e}")
-            traceback.print_exc()
-            send_message(chat_id, f"❌ خطا در دانلود:\n{e}")
-            job.status = "error"
-            job.error_message = str(e)
-            update_job(job)
+            safe_print(f"dl execute error: {e}")
+            send_message(chat_id, f"❌ خطا: {e}")
+            job.status = "error"; job.error_message = str(e); update_job(job)
         finally:
             shutil.rmtree(job_dir, ignore_errors=True)
         return
 
     session.current_job_id = job.job_id
-    TackServerDB.save_session(session)
+    set_session(session)
 
     job_dir = os.path.join("jobs_data", job.job_id)
     os.makedirs(job_dir, exist_ok=True)
 
     try:
-        if session.cancel_requested:
-            raise InterruptedError("لغو توسط کاربر")
+        if session.cancel_requested: raise InterruptedError("cancel")
 
         if job.mode == "screenshot":
-            send_message(chat_id, f"📸 در حال گرفتن اسکرین‌شات از:\n{job.url}")
-            context = get_or_create_context(chat_id)
-            screenshot_path = os.path.join(job_dir, "screenshot.png")
-            take_screenshot_fullpage(context, job.url, screenshot_path)
-
-            kb = {
-                "inline_keyboard": [
-                    [{"text": "🖼️ دریافت نسخه 4K", "callback_data": f"req4k_{job.job_id}"}]
-                ]
-            }
-            send_photo(chat_id, screenshot_path, caption=f"✅ اسکرین‌شات از:\n{job.url}")
-            send_message(chat_id, "اگر کیفیت فعلی راضی‌کننده نیست، می‌توانی نسخهٔ 4K را دریافت کنی:", reply_markup=kb)
-            job.status = "done"
-            update_job(job)
+            send_message(chat_id, f"📸 اسکرین‌شات از:\n{job.url}")
+            ctx = get_or_create_context(chat_id)
+            spath = os.path.join(job_dir, "screenshot.png")
+            screenshot_full(ctx, job.url, spath)
+            kb = {"inline_keyboard": [[{"text": "🖼️ 4K", "callback_data": f"req4k_{job.job_id}"}]]}
+            send_photo(chat_id, spath, caption=f"✅ {job.url}")
+            send_message(chat_id, "کیفیت بالاتر؟", reply_markup=kb)
+            job.status = "done"; update_job(job)
 
         elif job.mode == "4k_screenshot":
-            send_message(chat_id, f"🔍 در حال گرفتن اسکرین‌شات 4K از:\n{job.url}")
-            context = get_or_create_context(chat_id)
-            shot_path = os.path.join(job_dir, "screenshot_4k.png")
-            take_screenshot_4k(context, job.url, shot_path)
-            send_photo(chat_id, shot_path, caption=f"✅ اسکرین‌شات 4K از:\n{job.url}")
-            job.status = "done"
-            update_job(job)
+            send_message(chat_id, "🔍 4K...")
+            ctx = get_or_create_context(chat_id)
+            spath = os.path.join(job_dir, "screenshot_4k.png")
+            screenshot_4k(ctx, job.url, spath)
+            send_photo(chat_id, spath, caption=f"✅ 4K {job.url}")
+            job.status = "done"; update_job(job)
 
         elif job.mode == "download":
             handle_download(job, job_dir)
 
-        elif job.mode == "browser":
+        elif job.mode in ("browser", "browser_click"):
             handle_browser(job, job_dir)
 
-        elif job.mode == "browser_click":
-            handle_browser_click(job, job_dir, session)
-
         else:
-            send_message(chat_id, "❌ حالت ناشناخته.")
-            job.status = "error"
-            job.error_message = "حالت ناشناخته"
-            update_job(job)
+            send_message(chat_id, "❌ حالت نامعتبر")
+            job.status = "error"; update_job(job)
 
     except InterruptedError:
-        send_message(chat_id, "⏹️ عملیات لغو شد.")
-        job.status = "cancelled"
-        update_job(job)
+        send_message(chat_id, "⏹️ لغو شد."); job.status = "cancelled"; update_job(job)
     except Exception as e:
-        safe_print(f"[Worker {worker_id}] exception: {e}")
-        traceback.print_exc()
-        send_message(chat_id, f"❌ خطا در پردازش:\n{e}")
-        job.status = "error"
-        job.error_message = str(e)
-        update_job(job)
+        send_message(chat_id, f"❌ خطا: {e}"); job.status = "error"; job.error_message = str(e); update_job(job)
     finally:
         shutil.rmtree(job_dir, ignore_errors=True)
-        # فقط اگر job تموم شده باشه (منتظر کاربر نیست) session ریست بشه
-        final_job = find_job_by_id(job.job_id)
-        if final_job and final_job.status in ("done", "error", "cancelled"):
-            session = TackServerDB.load_session(chat_id) or SessionState(chat_id=chat_id)
-            session.state = "idle"
-            session.current_job_id = None
-            session.cancel_requested = False
-            TackServerDB.save_session(session)
-            send_message(chat_id, "🔄 پردازش به پایان رسید.", reply_markup=main_menu_keyboard())
-# ════════════════════════════════════
-# توابع دانلود و مرورگر
-# ════════════════════════════════════
-def handle_download(job: Job, job_dir: str):
+        final = find_job(job.job_id)
+        if final and final.status in ("done","error","cancelled"):
+            s = get_session(chat_id)
+            s.state = "idle"; s.current_job_id = None; s.cancel_requested = False
+            set_session(s)
+            send_message(chat_id, "🔄 آماده.", reply_markup=main_menu_keyboard())
+
+
+def handle_download(job, job_dir):
     chat_id = job.chat_id
     url = job.url
-
-    # ۱. لینک مستقیم؟
     if is_direct_file_url(url):
         direct_link = url
     else:
-        send_message(chat_id, "🔎 لینک مستقیم نیست. در حال جستجوی فایل در صفحه...")
+        send_message(chat_id, "🔎 جستجوی فایل...")
         direct_link = crawl_for_download_link(url)
         if not direct_link:
-            send_message(chat_id, "❌ هیچ فایل قابل دانلودی پیدا نشد.")
-            job.status = "error"
-            job.error_message = "No downloadable file found"
-            update_job(job)
-            return
+            send_message(chat_id, "❌ یافت نشد"); job.status = "error"; update_job(job); return
 
-    # ۲. اطلاعات فایل
     try:
-        head = requests.head(direct_link, timeout=15, allow_redirects=True)
-        content_type = head.headers.get("Content-Type", "unknown")
-        content_length = head.headers.get("Content-Length")
-        size_str = f"{int(content_length)/(1024*1024):.2f} MB" if content_length else "نامشخص"
+        head = requests.head(direct_link, timeout=10, allow_redirects=True)
+        size_str = f"{int(head.headers.get('Content-Length',0))/1024/1024:.2f} MB" if 'Content-Length' in head.headers else "نامشخص"
+        ftype = head.headers.get('Content-Type', 'unknown')
     except:
-        content_type = "unknown"
-        size_str = "نامشخص"
+        size_str = "نامشخص"; ftype = "unknown"
+    fname = get_filename_from_url(direct_link)
 
-    filename = get_filename_from_url(direct_link)
-
-    info_text = (
-        f"📄 **فایل پیدا شد:**\n"
-        f"نام: `{filename}`\n"
-        f"نوع: `{content_type}`\n"
-        f"حجم: `{size_str}`\n\n"
-        f"چگونه دانلود شود؟"
-    )
-
-    kb = {
-        "inline_keyboard": [
-            [
-                {"text": "📦 دانلود ZIP", "callback_data": f"dlzip_{job.job_id}"},
-                {"text": "📄 دانلود اصلی", "callback_data": f"dlraw_{job.job_id}"}
-            ],
-            [{"text": "❌ لغو دانلود", "callback_data": f"canceljob_{job.job_id}"}]
-        ]
-    }
-    send_message(chat_id, info_text, reply_markup=kb)
-
-    # job رو در حالت انتظار کاربر بذار
+    text = f"📄 فایل:\nنام: {fname}\nنوع: {ftype}\nحجم: {size_str}\nانتخاب کنید:"
+    kb = {"inline_keyboard": [
+        [{"text":"📦 ZIP","callback_data":f"dlzip_{job.job_id}"}, {"text":"📄 اصلی","callback_data":f"dlraw_{job.job_id}"}],
+        [{"text":"❌ لغو","callback_data":f"canceljob_{job.job_id}"}]
+    ]}
+    send_message(chat_id, text, reply_markup=kb)
     job.status = "awaiting_user"
-    job.extra = {"direct_link": direct_link, "filename": filename}
+    job.extra = {"direct_link": direct_link, "filename": fname}
     update_job(job)
 
-
-def execute_download(job: Job, job_dir: str):
+def execute_download(job, job_dir):
     chat_id = job.chat_id
-    extra = job.extra or {}
-    url = extra["direct_link"]
-    filename = extra["filename"]
-    pack_as_zip = extra.get("pack_zip", False)
-
-    file_path = os.path.join(job_dir, filename)
-    send_message(chat_id, "⏳ در حال دانلود فایل...")
+    extra = job.extra
+    url = extra["direct_link"]; fname = extra["filename"]; is_zip = extra.get("pack_zip", False)
+    fpath = os.path.join(job_dir, fname)
+    send_message(chat_id, "⏳ دانلود...")
     with requests.get(url, stream=True, timeout=120) as r:
         r.raise_for_status()
-        with open(file_path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=8192):
-                f.write(chunk)
-
-    if pack_as_zip:
-        send_message(chat_id, "📦 در حال فشرده‌سازی و ارسال...")
-        parts = create_zip_and_split(file_path, filename)
-        label = "ZIP"
+        with open(fpath, "wb") as f:
+            for chunk in r.iter_content(8192): f.write(chunk)
+    if is_zip:
+        parts = create_zip_and_split(fpath, fname); label = "ZIP"
     else:
-        send_message(chat_id, "📤 در حال تقسیم و ارسال فایل اصلی...")
-        base, ext = os.path.splitext(filename)
-        parts = split_file_binary(file_path, base, ext)
-        label = "اصلی"
+        base, ext = os.path.splitext(fname)
+        parts = split_file_binary(fpath, base, ext); label = "اصلی"
+    for idx, p in enumerate(parts, 1):
+        send_document(chat_id, p, caption=f"{label} پارت {idx}/{len(parts)}")
+    job.status = "done"; update_job(job)
 
-    for idx, part_path in enumerate(parts, 1):
-        cap = f"{label} - پارت {idx} از {len(parts)}"
-        send_document(chat_id, part_path, caption=cap)
-
-    job.status = "done"
-    update_job(job)
-
-
-def handle_browser(job: Job, job_dir: str):
+def handle_browser(job, job_dir):
     chat_id = job.chat_id
-    url = job.url
-    context = get_or_create_context(chat_id)
-    page = context.new_page()
+    ctx = get_or_create_context(chat_id)
+    page = ctx.new_page()
     try:
-        page.goto(url, timeout=90000, wait_until="networkidle")
+        page.goto(job.url, timeout=90000, wait_until="networkidle")
         page.wait_for_timeout(2000)
-        screenshot_path = os.path.join(job_dir, "browser.png")
-        page.screenshot(path=screenshot_path, full_page=True)
+        spath = os.path.join(job_dir, "browser.png")
+        page.screenshot(path=spath, full_page=True)
         links = extract_clickable_links(page)
-
         if links:
             kb = page_actions_keyboard(links, chat_id)
-            kb["inline_keyboard"].append(
-                [{"text": "❌ بستن مرورگر", "callback_data": f"closebrowser_{chat_id}"}]
-            )
-            caption = f"🌐 {url}\n\nبرای حرکت روی لینک‌ها کلیک کن:"
+            kb["inline_keyboard"].append([{"text":"❌ بستن","callback_data":f"closebrowser_{chat_id}"}])
+            cap = f"🌐 {job.url}"
         else:
-            kb = main_menu_keyboard()
-            caption = f"🌐 {url}\n\nهیچ لینکی یافت نشد."
-
-        send_photo(chat_id, screenshot_path, caption=caption, reply_markup=kb)
-        job.status = "done"
-        update_job(job)
+            kb = main_menu_keyboard(); cap = f"🌐 {job.url}\nبدون لینک"
+        send_photo(chat_id, spath, caption=cap, reply_markup=kb)
+        job.status = "done"; update_job(job)
     finally:
         page.close()
 
 
-def handle_browser_click(job: Job, job_dir: str, session: SessionState):
-    """کلیک روی لینک در مرورگر"""
-    handle_browser(job, job_dir)
-
-
 # ════════════════════════════════════
-# مدیریت Callbackها
+# مدیریت پیام‌ها و Callback
 # ════════════════════════════════════
-def handle_callback_query(callback_query: Dict[str, Any]):
-    cq_id = callback_query["id"]
-    message = callback_query.get("message")
-    data = callback_query.get("data", "")
-    if not message:
-        answer_callback_query(cq_id, "پیام نامعتبر")
-        return
-    chat_id = message["chat"]["id"]
-    session = TackServerDB.load_session(chat_id) or SessionState(chat_id=chat_id)
-
-    # منوی اصلی
-    if data == "menu_screenshot":
-        session.state = "waiting_url_screenshot"
-        TackServerDB.save_session(session)
-        answer_callback_query(cq_id, "لینک سایت را بفرستید")
-        send_message(chat_id, "📸 لطفاً URL سایت مورد نظر را ارسال کنید:")
-
-    elif data == "menu_download":
-        session.state = "waiting_url_download"
-        TackServerDB.save_session(session)
-        answer_callback_query(cq_id, "لینک سایت / فایل را بفرستید")
-        send_message(chat_id, "📥 لطفاً URL را بفرستید:")
-
-    elif data == "menu_browser":
-        session.state = "waiting_url_browser"
-        TackServerDB.save_session(session)
-        answer_callback_query(cq_id, "لینک را وارد کنید")
-        send_message(chat_id, "🧭 آدرس سایت را بفرستید:")
-
-    elif data == "menu_cancel":
-        session.state = "idle"
-        session.cancel_requested = True
-        session.current_job_id = None
-        TackServerDB.save_session(session)
-        close_user_context(chat_id)
-        answer_callback_query(cq_id, "وضعیت ریست شد")
-        send_message(chat_id, "✅ عملیات لغو شد.", reply_markup=main_menu_keyboard())
-
-    # اسکرین‌شات 4K
-    elif data.startswith("req4k_"):
-        job_id = data[6:]
-        job = find_job_by_id(job_id)
-        if job and job.status == "done":
-            new_job = Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="4k_screenshot", url=job.url)
-            enqueue_job(new_job)
-            answer_callback_query(cq_id, "درخواست 4K ثبت شد")
-            send_message(chat_id, "🖼️ درخواست اسکرین‌شات 4K ثبت شد...")
+def handle_message(chat_id: int, text: str):
+    session = get_session(chat_id)
+    if text.strip() == "/start":
+        session.state = "idle"; session.cancel_requested = False; set_session(session)
+        if not session.is_pro:
+            send_message(chat_id, "👋 خوش آمدید!\nبرای استفاده از ربات یکی از کدهای اشتراک پرو را وارد کنید:")
         else:
-            answer_callback_query(cq_id, "امکان درخواست 4K وجود ندارد")
-
-    # دانلود ZIP
-    elif data.startswith("dlzip_"):
-        job_id = data[6:]
-        job = find_job_by_id(job_id)
-        if job and job.status == "awaiting_user" and job.extra:
-            new_job = Job(
-                job_id=str(uuid.uuid4()), chat_id=chat_id, mode="download_execute", url=job.url,
-                extra={"direct_link": job.extra["direct_link"], "filename": job.extra["filename"], "pack_zip": True}
-            )
-            enqueue_job(new_job)
-            # job اصلی رو ببند
-            job.status = "done"
-            update_job(job)
-            answer_callback_query(cq_id, "دانلود ZIP آغاز شد")
-            send_message(chat_id, "📦 دانلود ZIP آغاز می‌شود...")
-        else:
-            answer_callback_query(cq_id, "گزینه منقضی شده")
-
-    # دانلود اصلی
-    elif data.startswith("dlraw_"):
-        job_id = data[6:]
-        job = find_job_by_id(job_id)
-        if job and job.status == "awaiting_user" and job.extra:
-            new_job = Job(
-                job_id=str(uuid.uuid4()), chat_id=chat_id, mode="download_execute", url=job.url,
-                extra={"direct_link": job.extra["direct_link"], "filename": job.extra["filename"], "pack_zip": False}
-            )
-            enqueue_job(new_job)
-            job.status = "done"
-            update_job(job)
-            answer_callback_query(cq_id, "دانلود اصلی آغاز شد")
-            send_message(chat_id, "📄 دانلود فرمت اصلی آغاز می‌شود...")
-        else:
-            answer_callback_query(cq_id, "گزینه منقضی شده")
-
-    # لغو دانلود
-    elif data.startswith("canceljob_"):
-        job_id = data[10:]
-        job = find_job_by_id(job_id)
-        if job:
-            job.status = "cancelled"
-            update_job(job)
-        answer_callback_query(cq_id, "دانلود لغو شد")
-        send_message(chat_id, "❌ دانلود لغو شد.", reply_markup=main_menu_keyboard())
-
-    # ناوبری مرورگر
-    elif data.startswith("nav_"):
-        parts = data.split("_", 2)
-        if len(parts) >= 3:
-            cb_id = f"{parts[0]}_{parts[1]}_{parts[2]}"
-            with callback_map_lock:
-                url = callback_map.pop(cb_id, None)
-            if url:
-                new_job = Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="browser_click", url=url)
-                enqueue_job(new_job)
-                answer_callback_query(cq_id, "در حال بارگذاری...")
-            else:
-                answer_callback_query(cq_id, "لینک منقضی شده")
-
-    # بستن مرورگر
-    elif data.startswith("closebrowser_"):
-        close_user_context(chat_id)
-        answer_callback_query(cq_id, "مرورگر بسته شد")
-        send_message(chat_id, "🧭 مرورگر بسته شد.", reply_markup=main_menu_keyboard())
-
-    else:
-        answer_callback_query(cq_id, "دستور ناشناخته")
-
-
-# ════════════════════════════════════
-# مدیریت پیام‌های متنی
-# ════════════════════════════════════
-def handle_text_message(chat_id: int, text: str):
-    text = text.strip()
-    session = TackServerDB.load_session(chat_id) or SessionState(chat_id=chat_id)
-
-    if text == "/start":
-        session.state = "idle"
-        session.cancel_requested = False
-        session.current_job_id = None
-        TackServerDB.save_session(session)
-        send_message(chat_id, "سلام 👋 به ربات مرورگر/دانلودر خوش آمدید!", reply_markup=main_menu_keyboard())
+            send_message(chat_id, "منوی اصلی:", reply_markup=main_menu_keyboard())
         return
 
-    if text == "/cancel":
-        session.state = "idle"
-        session.cancel_requested = True
-        session.current_job_id = None
-        TackServerDB.save_session(session)
+    if text.strip() == "/cancel":
+        session.state = "idle"; session.cancel_requested = True; session.current_job_id = None
+        set_session(session)
         close_user_context(chat_id)
-        send_message(chat_id, "⏹️ تمام عملیات‌ها لغو و وضعیت ریست شد.", reply_markup=main_menu_keyboard())
+        send_message(chat_id, "⏹️ لغو شد.", reply_markup=main_menu_keyboard())
         return
 
+    # اگر کاربر پرو نباشه، فقط کد قبول می‌کنیم
+    if not session.is_pro:
+        if text.strip() in PRO_CODES:
+            session.is_pro = True; set_session(session)
+            send_message(chat_id, "✅ کد تأیید شد! اکنون میتوانید از ربات استفاده کنید.", reply_markup=main_menu_keyboard())
+        else:
+            send_message(chat_id, "⛔ کد نامعتبر. لطفاً یکی از کدهای پرو را وارد کنید:")
+        return
+
+    # کاربر پرو است
     if session.state.startswith("waiting_url_"):
-        url = text
+        url = text.strip()
         if not (url.startswith("http://") or url.startswith("https://")):
-            send_message(chat_id, "❌ لطفاً یک URL معتبر وارد کنید.")
-            return
-
+            send_message(chat_id, "❌ URL نامعتبر"); return
         mode_map = {
             "waiting_url_screenshot": "screenshot",
             "waiting_url_download": "download",
-            "waiting_url_browser": "browser",
+            "waiting_url_browser": "browser"
         }
         mode = mode_map.get(session.state, "screenshot")
-
         job = Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode=mode, url=url)
-        enqueue_job(job)
-
-        session.state = "idle"
-        session.current_job_id = job.job_id
-        TackServerDB.save_session(session)
-
-        idle_worker = find_idle_worker()
-        if idle_worker:
-            send_message(chat_id, "✅ درخواست ثبت شد و به‌زودی پردازش می‌شود.")
+        enqueue(job)
+        session.state = "idle"; session.current_job_id = job.job_id
+        set_session(session)
+        if find_idle_worker():
+            send_message(chat_id, "✅ در صف قرار گرفت.")
         else:
-            pos = get_job_queue_position(job.job_id) or "؟"
-            send_message(chat_id, f"✅ درخواست در صف قرار گرفت.\n🎫 نوبت شما: {pos}")
+            pos = job_queue_position(job.job_id)
+            send_message(chat_id, f"✅ در صف (نوبت {pos})")
         return
 
-    send_message(chat_id, "لطفاً از منوی زیر استفاده کنید:", reply_markup=main_menu_keyboard())
+    # حالت پیش‌فرض
+    send_message(chat_id, "از منو استفاده کنید:", reply_markup=main_menu_keyboard())
+
+def handle_callback(cq: Dict):
+    cid = cq["id"]; msg = cq.get("message"); data = cq.get("data","")
+    if not msg: answer_callback_query(cid); return
+    chat_id = msg["chat"]["id"]
+    session = get_session(chat_id)
+
+    if data == "menu_screenshot":
+        if not session.is_pro: answer_callback_query(cid,"اشتراک پرو نیاز است"); return
+        session.state = "waiting_url_screenshot"; set_session(session)
+        send_message(chat_id, "📸 URL اسکرین‌شات:")
+    elif data == "menu_download":
+        if not session.is_pro: answer_callback_query(cid,"اشتراک پرو نیاز است"); return
+        session.state = "waiting_url_download"; set_session(session)
+        send_message(chat_id, "📥 URL دانلود:")
+    elif data == "menu_browser":
+        if not session.is_pro: answer_callback_query(cid,"اشتراک پرو نیاز است"); return
+        session.state = "waiting_url_browser"; set_session(session)
+        send_message(chat_id, "🧭 URL مرورگر:")
+    elif data == "menu_cancel":
+        session.state = "idle"; session.cancel_requested = True; session.current_job_id = None
+        set_session(session)
+        close_user_context(chat_id)
+        send_message(chat_id, "✅ لغو شد.", reply_markup=main_menu_keyboard())
+    elif data.startswith("req4k_"):
+        jid = data[6:]
+        job = find_job(jid)
+        if job and job.status == "done":
+            new_job = Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="4k_screenshot", url=job.url)
+            enqueue(new_job)
+            send_message(chat_id, "🖼️ درخواست 4K ثبت شد.")
+    elif data.startswith("dlzip_") or data.startswith("dlraw_"):
+        jid = data[6:] if data.startswith("dlzip_") else data[6:]
+        job = find_job(jid)
+        if job and job.status == "awaiting_user" and job.extra:
+            is_zip = data.startswith("dlzip_")
+            new_job = Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="download_execute", url=job.url,
+                          extra={"direct_link": job.extra["direct_link"], "filename": job.extra["filename"], "pack_zip": is_zip})
+            enqueue(new_job)
+            job.status = "done"; update_job(job)
+            send_message(chat_id, "⬇️ دانلود آغاز شد...")
+    elif data.startswith("canceljob_"):
+        jid = data[10:]
+        job = find_job(jid)
+        if job: job.status = "cancelled"; update_job(job)
+        send_message(chat_id, "❌ لغو شد.", reply_markup=main_menu_keyboard())
+    elif data.startswith("nav_"):
+        parts = data.split("_", 2)
+        if len(parts) >= 3:
+            cb = f"{parts[0]}_{parts[1]}_{parts[2]}"
+            with callback_map_lock: url = callback_map.pop(cb, None)
+            if url:
+                enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="browser", url=url))
+    elif data.startswith("closebrowser_"):
+        close_user_context(chat_id)
+        send_message(chat_id, "🧭 بسته شد.", reply_markup=main_menu_keyboard())
+    answer_callback_query(cid)
 
 
 # ════════════════════════════════════
-# حلقهٔ اصلی Polling و Main
+# Polling و main
 # ════════════════════════════════════
-def polling_loop(stop_event: threading.Event):
+def polling_loop(stop_event):
     offset = None
-    safe_print("[Polling] شروع دریافت به‌روزرسانی‌ها")
     while not stop_event.is_set():
         try:
             updates = get_updates(offset=offset, timeout=LONG_POLL_TIMEOUT)
         except Exception as e:
-            safe_print(f"[Polling] خطا: {e}")
-            time.sleep(5)
-            continue
-
+            safe_print(f"Poll error: {e}"); time.sleep(5); continue
         for upd in updates:
             offset = upd["update_id"] + 1
-            try:
-                if "message" in upd:
-                    msg = upd["message"]
-                    chat_id = msg["chat"]["id"]
-                    if "text" in msg:
-                        handle_text_message(chat_id, msg["text"])
-                elif "callback_query" in upd:
-                    handle_callback_query(upd["callback_query"])
-            except Exception as e:
-                safe_print(f"[Polling] خطا: {e}")
-                traceback.print_exc()
-    safe_print("[Polling] متوقف شد")
-
-
-def ensure_dirs():
-    os.makedirs("jobs_data", exist_ok=True)
-
+            if "message" in upd and "text" in upd["message"]:
+                handle_message(upd["message"]["chat"]["id"], upd["message"]["text"])
+            elif "callback_query" in upd:
+                handle_callback(upd["callback_query"])
 
 def main():
-    ensure_dirs()
+    os.makedirs("jobs_data", exist_ok=True)
     stop_event = threading.Event()
-
-    worker_threads = []
     for i in range(WORKER_COUNT):
-        t = threading.Thread(target=worker_loop, args=(i, stop_event), daemon=True)
-        t.start()
-        worker_threads.append(t)
-
-    poll_thread = threading.Thread(target=polling_loop, args=(stop_event,), daemon=True)
-    poll_thread.start()
-
-    safe_print("✅ ربات اجرا شد. برای توقف Ctrl+C بزنید.")
+        threading.Thread(target=worker_loop, args=(i, stop_event), daemon=True).start()
+    threading.Thread(target=polling_loop, args=(stop_event,), daemon=True).start()
+    safe_print("ربات پرو اجرا شد")
     try:
-        while True:
-            time.sleep(1)
+        while True: time.sleep(1)
     except KeyboardInterrupt:
-        safe_print("در حال توقف...")
         stop_event.set()
-        time.sleep(2)
-
 
 if __name__ == "__main__":
     main()
