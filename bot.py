@@ -2,11 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 ربات بله – مرورگر تعاملی، دانلودر هوشمند، اسکرین‌شات 4K، اسکن فایل‌های بزرگ
-+ حالت دانلود کور + رفع تمام باگ‌ها
++ دانلود کور + ضبط ۲۰ ثانیه (MKV) + دانلود از یوتیوب
 """
 
 import os, sys, json, time, math, queue, shutil, zipfile, uuid, re, hashlib
-import threading, traceback
+import subprocess, threading, traceback
 from dataclasses import dataclass, asdict
 from typing import Dict, Any, Optional, List, Tuple
 from urllib.parse import urlparse, urljoin, unquote
@@ -54,8 +54,8 @@ class SessionState:
     browser_url: Optional[str] = None
     last_interaction: float = time.time()
     cancel_requested: bool = False
-    text_links: Optional[Dict[str, str]] = None   # command -> url
-    browser_links: Optional[List[Dict[str, str]]] = None  # برای اسکن فایل‌های بزرگ
+    text_links: Optional[Dict[str, str]] = None
+    browser_links: Optional[List[Dict[str, str]]] = None
 
 @dataclass
 class Job:
@@ -184,8 +184,6 @@ def close_user_context(chat_id):
 # استخراج المان‌های صفحه + ویدیو با Network Monitoring
 # ═══════════════════════════════════════
 def extract_clickable_and_media(page):
-    """برمی‌گرداند: (links, video_urls)"""
-    # استخراج لینک‌های معمولی
     raw = page.evaluate("""() => {
         const items = [];
         const seen = new Set();
@@ -195,8 +193,7 @@ def extract_clickable_and_media(page):
             items.push([type, text.trim().substring(0, 35), href]);
         }
         document.querySelectorAll('a[href]').forEach(a => {
-            let t = a.textContent.trim();
-            if (!t) t = 'لینک';
+            let t = a.textContent.trim() || 'لینک';
             add('link', t, a.href);
         });
         document.querySelectorAll('button[onclick], button[formaction]').forEach(btn => {
@@ -218,7 +215,6 @@ def extract_clickable_and_media(page):
             if m: href = m.group(0)
         if href.startswith("http"): links.append((typ, txt, href))
 
-    # ضبط لینک‌های ویدیویی با Network monitoring
     video_urls = []
     def capture_response(response):
         if response.request.resource_type in ("media",):
@@ -226,12 +222,12 @@ def extract_clickable_and_media(page):
         elif "video" in (response.headers.get("content-type") or ""):
             video_urls.append(response.url)
     page.on("response", capture_response)
-    # یکبار دیگه wait باشه
     page.wait_for_timeout(1500)
     page.remove_listener("response", capture_response)
 
     unique_videos = list(dict.fromkeys(video_urls))
     return links, unique_videos
+
 # ═══════════════════════════════════════
 # ابزارهای فایل
 # ═══════════════════════════════════════
@@ -433,14 +429,20 @@ def process_job(worker_id: int, job: Job):
             shutil.rmtree(job_dir, ignore_errors=True)
         return
 
-    # اگر برای اسکن فایل‌های بزرگ باشه (Job جدید از مرورگر)
     if job.mode == "scan_files":
         handle_scan_files(job)
         return
 
-    # برای blind_download
     if job.mode == "blind_download":
         handle_blind_download(job)
+        return
+
+    if job.mode == "record_video":
+        handle_record_video(job)
+        return
+
+    if job.mode == "youtube_download":
+        handle_youtube_download(job)
         return
 
     session.current_job_id = job.job_id
@@ -493,7 +495,6 @@ def process_job(worker_id: int, job: Job):
         if final and final.status in ("done","error","cancelled"):
             s = get_session(chat_id)
             if s.state == "browsing":
-                # اگر مرورگر فعال بود، دستش نزن
                 pass
             else:
                 s.state = "idle"
@@ -508,15 +509,12 @@ def process_job(worker_id: int, job: Job):
 def handle_download(job: Job, job_dir: str):
     chat_id = job.chat_id
     url = job.url
-    # لایه ۱: لینک مستقیم
     if is_direct_file_url(url):
         direct_link = url
     else:
-        # لایه ۲: خزیدن
         send_message(chat_id, "🔎 جستجوی فایل...")
         direct_link = crawl_for_download_link(url)
         if not direct_link:
-            # لایه ۳: دانلود کور
             send_message(chat_id, "⚠️ تحلیل جواب نداد. تغییر به حالت دانلود کور...")
             job.mode = "blind_download"
             job.url = url
@@ -524,7 +522,6 @@ def handle_download(job: Job, job_dir: str):
             handle_blind_download(job)
             return
 
-    # نمایش اطلاعات فایل
     try:
         head = requests.head(direct_link, timeout=10, allow_redirects=True)
         size = head.headers.get("Content-Length")
@@ -545,7 +542,6 @@ def handle_download(job: Job, job_dir: str):
     update_job(job)
 
 def handle_blind_download(job: Job):
-    """دانلود کور: مستقیم دانلود کن و همون اول اطلاعات بگیر"""
     chat_id = job.chat_id
     url = job.url
     job_dir = os.path.join("jobs_data", job.job_id)
@@ -555,9 +551,7 @@ def handle_blind_download(job: Job):
         with requests.get(url, stream=True, timeout=120, headers={"User-Agent": "Mozilla/5.0"}) as r:
             r.raise_for_status()
             content_type = r.headers.get("Content-Type", "application/octet-stream")
-            length = r.headers.get("Content-Length")
             fname = get_filename_from_url(url)
-            # اگر اسم فایل حدس پسوند نداشت، از content-type حدس بزن
             if '.' not in fname:
                 extmap = {"video/mp4":".mp4", "application/pdf":".pdf", "application/zip":".zip"}
                 for ct, ext in extmap.items():
@@ -586,7 +580,6 @@ def handle_blind_download(job: Job):
 def execute_download(job: Job, job_dir: str):
     chat_id = job.chat_id
     extra = job.extra
-    # اگر از blind آمده باشد مسیر فایل موجود است
     if "file_path" in extra:
         fpath = extra["file_path"]
         fname = extra["filename"]
@@ -610,7 +603,53 @@ def execute_download(job: Job, job_dir: str):
     job.status = "done"; update_job(job)
 
 # ═══════════════════════════════════════
-# اسکن فایل‌های بزرگ (ابزار سوم)
+# دانلود یوتیوب (yt-dlp)
+# ═══════════════════════════════════════
+def handle_youtube_download(job: Job):
+    chat_id = job.chat_id
+    url = job.url
+    job_dir = os.path.join("jobs_data", job.job_id)
+    os.makedirs(job_dir, exist_ok=True)
+    send_message(chat_id, "📥 در حال دریافت ویدیوی یوتیوب...")
+
+    try:
+        # قالب خروجی: title + id
+        outtmpl = os.path.join(job_dir, "%(title)s-%(id)s.%(ext)s")
+        cmd = [
+            "yt-dlp",
+            "--no-playlist",
+            "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+            "--merge-output-format", "mkv",
+            "-o", outtmpl,
+            url
+        ]
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
+
+        # پیدا کردن فایل ایجادشده
+        files = [f for f in os.listdir(job_dir) if f.endswith(".mkv") or f.endswith(".mp4") or f.endswith(".webm")]
+        if not files:
+            send_message(chat_id, "❌ فایل ویدیو پیدا نشد.")
+            job.status = "error"; update_job(job)
+            return
+        video_path = os.path.join(job_dir, files[0])
+
+        # تقسیم و ارسال
+        if os.path.getsize(video_path) > ZIP_PART_SIZE:
+            parts = split_file_binary(video_path, "youtube_video", os.path.splitext(video_path)[1])
+            for idx, p in enumerate(parts, 1):
+                send_document(chat_id, p, caption=f"🎬 پارت {idx}/{len(parts)}")
+        else:
+            send_document(chat_id, video_path, caption="🎬 ویدیوی یوتیوب")
+
+        job.status = "done"; update_job(job)
+    except Exception as e:
+        send_message(chat_id, f"❌ خطا در دانلود یوتیوب: {e}")
+        job.status = "error"; job.error_message = str(e); update_job(job)
+    finally:
+        shutil.rmtree(job_dir, ignore_errors=True)
+
+# ═══════════════════════════════════════
+# اسکن فایل‌های بزرگ
 # ═══════════════════════════════════════
 def handle_scan_files(job: Job):
     chat_id = job.chat_id
@@ -643,11 +682,69 @@ def handle_scan_files(job: Job):
     if kb_rows:
         kb_rows.append([{"text":"❌ بستن", "callback_data":"close_scan"}])
         send_message(chat_id, "برای دانلود انتخاب کنید:", reply_markup={"inline_keyboard": kb_rows})
-    # ذخیره کال‌بک‌ها در session?
     job.status = "done"; update_job(job)
 
 # ═══════════════════════════════════════
-# مرورگر تعاملی (اصلاح‌شده)
+# ضبط ویدیو ۲۰ ثانیه (MKV)
+# ═══════════════════════════════════════
+def handle_record_video(job: Job):
+    chat_id = job.chat_id
+    url = job.url
+    job_dir = os.path.join("jobs_data", job.job_id)
+    os.makedirs(job_dir, exist_ok=True)
+    send_message(chat_id, "🎬 در حال ضبط ۲۰ ثانیه...")
+
+    try:
+        context = _global_browser.new_context(
+            viewport={"width": 1280, "height": 720},
+            record_video_dir=job_dir,
+            record_video_size={"width": 1280, "height": 720}
+        )
+        page = context.new_page()
+        try:
+            page.goto(url, timeout=90000, wait_until="networkidle")
+            try:
+                page.evaluate("() => { const v = document.querySelector('video'); if (v) v.play(); }")
+            except: pass
+            try:
+                page.click('.play-button, [aria-label="Play"], .ytp-large-play-button, .vjs-big-play-button', timeout=2000)
+            except: pass
+            page.wait_for_timeout(20000)
+        finally:
+            page.close()
+            context.close()
+
+        video_files = [f for f in os.listdir(job_dir) if f.endswith('.webm')]
+        if not video_files:
+            send_message(chat_id, "❌ ویدیویی ضبط نشد.")
+            job.status = "error"; update_job(job)
+            return
+
+        webm_path = os.path.join(job_dir, video_files[0])
+        mkv_path = webm_path.replace('.webm', '.mkv')
+        try:
+            subprocess.run(['ffmpeg', '-y', '-i', webm_path, '-c', 'copy', mkv_path],
+                           check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+            final_path = mkv_path
+        except:
+            final_path = webm_path
+
+        if os.path.getsize(final_path) > ZIP_PART_SIZE:
+            parts = split_file_binary(final_path, "record", os.path.splitext(final_path)[1])
+            for idx, p in enumerate(parts, 1):
+                send_document(chat_id, p, caption=f"🎬 پارت {idx}/{len(parts)}")
+        else:
+            send_document(chat_id, final_path, caption="🎬 ویدیوی ضبط‌شده")
+
+        job.status = "done"; update_job(job)
+    except Exception as e:
+        send_message(chat_id, f"❌ خطا در ضبط: {e}")
+        job.status = "error"; job.error_message = str(e); update_job(job)
+    finally:
+        shutil.rmtree(job_dir, ignore_errors=True)
+
+# ═══════════════════════════════════════
+# مرورگر تعاملی (با دکمه‌های یوتیوب)
 # ═══════════════════════════════════════
 def handle_browser(job: Job, job_dir: str):
     chat_id = job.chat_id
@@ -660,14 +757,18 @@ def handle_browser(job: Job, job_dir: str):
         page.screenshot(path=spath, full_page=True)
         links, video_urls = extract_clickable_and_media(page)
 
-        # ساخت لیست لینک‌ها برای اسکن احتمالی
         all_links_for_scan = []
         keyboard_rows = []
         idx = 0
-        # دکمه‌های معمولی
+
+        # تشخیص یوتیوب در خود URL صفحه
+        is_youtube = False
+        parsed = urlparse(job.url)
+        if ("youtube.com" in parsed.netloc and "/watch" in parsed.path) or "youtu.be" in parsed.netloc:
+            is_youtube = True
+
         for typ, text, href in links:
             if typ == "video" or href in video_urls:
-                # لینک ویدیو – دکمه دانلود مستقیم
                 cb = f"dlvid_{chat_id}_{idx}"
                 with callback_map_lock: callback_map[cb] = href
                 keyboard_rows.append([{"text": f"🎬 {text[:20]}", "callback_data": cb}])
@@ -678,14 +779,15 @@ def handle_browser(job: Job, job_dir: str):
             all_links_for_scan.append({"text": text, "href": href})
             idx += 1
 
-        # ویدیوهای شبکه
         for vurl in video_urls:
             cb = f"dlvid_{chat_id}_{idx}"
             with callback_map_lock: callback_map[cb] = vurl
             keyboard_rows.append([{"text": f"🎬 ویدیو", "callback_data": cb}])
             idx += 1
 
-        # اگر تعداد زیاد بود، کامندهای متنی
+        if is_youtube:
+            keyboard_rows.append([{"text": "🎥 دانلود ویدیو یوتیوب", "callback_data": f"ytdl_{chat_id}"}])
+
         if len(keyboard_rows) > 30:
             extra = keyboard_rows[30:]
             keyboard_rows = keyboard_rows[:30]
@@ -701,16 +803,16 @@ def handle_browser(job: Job, job_dir: str):
             sess.text_links = cmds
             set_session(sess)
 
-        # دکمه‌های پایینی
+        keyboard_rows.append([{"text": "🎬 ضبط ۲۰ ثانیه", "callback_data": f"recvid_{chat_id}"}])
         keyboard_rows.append([{"text": "🔍 اسکن فایل‌های بزرگ", "callback_data": f"scan_{chat_id}"}])
         keyboard_rows.append([{"text": "❌ بستن مرورگر", "callback_data": f"closebrowser_{chat_id}"}])
         kb = {"inline_keyboard": keyboard_rows}
         send_document(chat_id, spath, caption=f"🌐 {job.url}")
         send_message(chat_id, "برای پیمایش:", reply_markup=kb)
 
-        # ذخیره لینک‌ها برای اسکن در session
         session = get_session(chat_id)
         session.state = "browsing"
+        session.browser_url = job.url
         session.browser_links = all_links_for_scan
         set_session(session)
 
@@ -748,7 +850,6 @@ def handle_message(chat_id: int, text: str):
             send_message(chat_id, "⛔ کد نامعتبر")
         return
 
-    # حالت browsing: قبول کامندهای متنی
     if session.state == "browsing":
         if session.text_links and text in session.text_links:
             cb = session.text_links.pop(text)
@@ -758,10 +859,8 @@ def handle_message(chat_id: int, text: str):
             if url:
                 enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="browser", url=url))
             return
-        # در غیر این صورت نادیده بگیر (منو نمی‌دیم)
         return
 
-    # حالت‌های انتظار URL
     if session.state.startswith("waiting_url_"):
         url = text
         if not (url.startswith("http://") or url.startswith("https://")):
@@ -780,7 +879,6 @@ def handle_message(chat_id: int, text: str):
         send_message(chat_id, f"✅ در صف (نوبت {pos})" if pos != 1 else "✅ در صف قرار گرفت.")
         return
 
-    # پیش‌فرض
     send_message(chat_id, "از منو استفاده کنید:", reply_markup=main_menu_keyboard())
 
 def handle_callback(cq: Dict):
@@ -826,8 +924,13 @@ def handle_callback(cq: Dict):
     elif data.startswith("canceljob_"):
         jid = data[10:]
         job = find_job(jid)
-        if job: job.status = "cancelled"; update_job(job)
-        answer_callback_query(cid, "لغو")
+        if job:
+            job.status = "cancelled"
+            update_job(job)
+            answer_callback_query(cid, "لغو")
+            send_message(chat_id, "❌ دانلود لغو شد.", reply_markup=main_menu_keyboard())
+        else:
+            answer_callback_query(cid, "کاربرگ یافت نشد")
     elif data.startswith("nav_"):
         parts = data.split("_", 2)
         if len(parts) >= 3:
@@ -845,9 +948,23 @@ def handle_callback(cq: Dict):
                 enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="download", url=url))
                 answer_callback_query(cid, "دانلود ویدیو")
     elif data.startswith("scan_"):
-        # درخواست اسکن فایل‌های بزرگ
         enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="scan_files", url=""))
         answer_callback_query(cid, "اسکن شروع شد")
+    elif data.startswith("recvid_"):
+        url = session.browser_url
+        if url:
+            enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="record_video", url=url))
+            answer_callback_query(cid, "ضبط شروع شد")
+        else:
+            answer_callback_query(cid, "آدرس صفحه نامشخص")
+    elif data.startswith("ytdl_"):
+        url = session.browser_url
+        if url:
+            enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="youtube_download", url=url))
+            answer_callback_query(cid, "دانلود یوتیوب آغاز شد")
+            send_message(chat_id, "📥 در حال دریافت ویدیوی یوتیوب...")
+        else:
+            answer_callback_query(cid, "آدرس یوتیوب نامشخص")
     elif data.startswith("bigdl_"):
         parts = data.split("_", 2)
         if len(parts) >= 3:
@@ -890,7 +1007,7 @@ def main():
     for i in range(WORKER_COUNT):
         threading.Thread(target=worker_loop, args=(i, stop_event), daemon=True).start()
     threading.Thread(target=polling_loop, args=(stop_event,), daemon=True).start()
-    safe_print("✅ ربات نهایی اجرا شد")
+    safe_print("✅ ربات (YouTube + MKV ضبط) اجرا شد")
     try:
         while True: time.sleep(1)
     except KeyboardInterrupt:
