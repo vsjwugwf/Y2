@@ -2,557 +2,864 @@
 # -*- coding: utf-8 -*-
 
 import os
+import sys
 import json
 import time
-import uuid
 import math
-import logging
+import queue
+import shutil
+import zipfile
+import traceback
 import threading
-from typing import Dict, Any, List, Optional
+from dataclasses import dataclass, asdict
+from typing import Dict, Any, Optional, List
 
 import requests
+from playwright.sync_api import sync_playwright
 
-# ========== تنظیمات عمومی ==========
+# ==========================
+# تنظیمات پایه
+# ==========================
+
 BALE_BOT_TOKEN = os.getenv("BALE_BOT_TOKEN", "").strip()
 if not BALE_BOT_TOKEN:
-    raise RuntimeError("متغیر محیطی BALE_BOT_TOKEN تنظیم نشده است.")
+    print("ERROR: متغیر محیطی BALE_BOT_TOKEN تنظیم نشده است.", file=sys.stderr)
+    sys.exit(1)
 
-BALE_API_BASE = f"https://tapi.bale.ai/bot{BALE_BOT_TOKEN}"
+BALE_API_URL = "https://tapi.bale.ai/bot" + BALE_BOT_TOKEN
 
-POLL_TIMEOUT = 25  # ثانیه برای long-polling
-DATA_DIR = "."     # می‌تواند در GitHub Actions روی /tmp باشد
+# برای جلوگیری از کرش در صورت قطع موقت
+REQUEST_TIMEOUT = 30
+LONG_POLL_TIMEOUT = 50
 
-SESSIONS_FILE = os.path.join(DATA_DIR, "sessions.json")
-QUEUE_FILE = os.path.join(DATA_DIR, "queue.json")
-WORKERS_FILE = os.path.join(DATA_DIR, "workers.json")
+# تعداد ورکرها
+WORKER_COUNT = 3
 
-MAX_WORKERS = 3
-MAX_ZIP_SIZE_MB = 20.0
-SPLIT_PART_SIZE_MB = 19.5
-SPLIT_PART_SIZE_BYTES = int(SPLIT_PART_SIZE_MB * 1024 * 1024)
+# حداکثر حجم هر پارت ZIP که به بله ارسال می‌کنیم (بر حسب بایت)
+# 19.5 مگابایت
+ZIP_PART_SIZE = int(19.5 * 1024 * 1024)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+# نام فایل‌های ذخیره‌سازی
+SESSIONS_FILE = "sessions.json"
+QUEUE_FILE = "queue.json"
+WORKERS_FILE = "workers.json"
+
+# قفل‌ها برای دسترسی همزمان ایمن
+sessions_lock = threading.Lock()
+queue_lock = threading.Lock()
+workers_lock = threading.Lock()
+print_lock = threading.Lock()
 
 
-# ========== توابع کمکی JSON (load/save) ==========
+def safe_print(*args, **kwargs):
+    with print_lock:
+        print(*args, **kwargs, flush=True)
 
-def load_json(path: str, default):
+
+# ==========================
+# کلاس‌های داده
+# ==========================
+
+@dataclass
+class SessionState:
+    chat_id: int
+    state: str = "idle"           # idle, waiting_url_screenshot, waiting_url_download, waiting_url_browser
+    current_job_id: Optional[str] = None
+    browser_session_id: Optional[str] = None
+    last_interaction: float = time.time()
+
+
+@dataclass
+class Job:
+    job_id: str
+    chat_id: int
+    mode: str           # "screenshot", "download", "browser"
+    url: str
+    status: str = "queued"   # queued, running, done, error, cancelled
+    created_at: float = time.time()
+    updated_at: float = time.time()
+    error_message: Optional[str] = None
+
+
+@dataclass
+class WorkerInfo:
+    worker_id: int
+    current_job_id: Optional[str] = None
+    status: str = "idle"     # idle, busy
+
+
+# ==========================
+# ابزارهای فایل JSON
+# ==========================
+
+def load_json_file(path: str, default):
+    if not os.path.exists(path):
+        return default
     try:
-        if not os.path.exists(path):
-            return default
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
-        logging.error(f"خطا در خواندن {path}: {e}")
+        safe_print(f"ERROR loading {path}: {e}")
         return default
 
 
-def save_json(path: str, data) -> None:
+def save_json_file(path: str, data):
     tmp_path = path + ".tmp"
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         os.replace(tmp_path, path)
     except Exception as e:
-        logging.error(f"خطا در نوشتن {path}: {e}")
+        safe_print(f"ERROR saving {path}: {e}")
 
 
-# ========== مدیریت سشن‌ها (users / state machine) ==========
+# ==========================
+# مدیریت Session ها
+# ==========================
 
-class SessionManager:
-    def __init__(self, path: str):
-        self.path = path
-        self.sessions: Dict[str, Dict[str, Any]] = load_json(path, {})
-
-    def get(self, user_id: str) -> Dict[str, Any]:
-        if user_id not in self.sessions:
-            self.sessions[user_id] = {
-                "user_id": user_id,
-                "state": "idle",        # idle, waiting_for_url, in_queue, processing, viewing_browser, cancelling
-                "mode": None,           # screenshot, download, browser
-                "last_url": None,
-                "job_id": None,
-                "status": None,
-                "joined_at": time.time(),
-            }
-            self.save()
-        return self.sessions[user_id]
-
-    def update(self, user_id: str, **kwargs):
-        sess = self.get(user_id)
-        sess.update(kwargs)
-        self.save()
-
-    def save(self):
-        save_json(self.path, self.sessions)
+def load_sessions() -> Dict[str, Any]:
+    with sessions_lock:
+        data = load_json_file(SESSIONS_FILE, {})
+        return data
 
 
-# ========== مدیریت صف ==========
-class QueueManager:
-    def __init__(self, path: str):
-        self.path = path
-        self.queue: List[Dict[str, Any]] = load_json(path, [])
-
-    def add_job(self, job: Dict[str, Any]):
-        self.queue.append(job)
-        self.save()
-
-    def pop_next(self) -> Optional[Dict[str, Any]]:
-        if not self.queue:
-            return None
-        job = self.queue.pop(0)
-        self.save()
-        return job
-
-    def remove_job(self, job_id: str):
-        self.queue = [j for j in self.queue if j.get("job_id") != job_id]
-        self.save()
-
-    def get_position(self, job_id: str) -> Optional[int]:
-        for idx, job in enumerate(self.queue, start=1):
-            if job.get("job_id") == job_id:
-                return idx
-        return None
-
-    def save(self):
-        save_json(self.path, self.queue)
+def save_sessions(sessions: Dict[str, Any]):
+    with sessions_lock:
+        save_json_file(SESSIONS_FILE, sessions)
 
 
-# ========== مدیریت ورکرها ==========
-class WorkerManager:
-    def __init__(self, path: str):
-        self.path = path
-        self.workers: List[Dict[str, Any]] = load_json(path, [])
-        # در صورت خالی بودن، سه ورکر بساز
-        if not self.workers:
-            for i in range(MAX_WORKERS):
-                self.workers.append({
-                    "id": i + 1,
-                    "status": "idle",  # idle, busy
-                    "job_id": None,
-                    "user_id": None,
-                    "started_at": None,
-                })
-            self.save()
-
-    def find_idle_worker(self) -> Optional[Dict[str, Any]]:
-        for w in self.workers:
-            if w["status"] == "idle":
-                return w
-        return None
-
-    def set_worker_job(self, worker_id: int, job_id: str, user_id: str):
-        for w in self.workers:
-            if w["id"] == worker_id:
-                w["status"] = "busy"
-                w["job_id"] = job_id
-                w["user_id"] = user_id
-                w["started_at"] = time.time()
-                break
-        self.save()
-
-    def release_worker(self, worker_id: int):
-        for w in self.workers:
-            if w["id"] == worker_id:
-                w["status"] = "idle"
-                w["job_id"] = None
-                w["user_id"] = None
-                w["started_at"] = None
-                break
-        self.save()
-
-    def find_worker_by_job(self, job_id: str) -> Optional[Dict[str, Any]]:
-        for w in self.workers:
-            if w["job_id"] == job_id:
-                return w
-        return None
-
-    def save(self):
-        save_json(self.path, self.workers)
+def get_or_create_session(chat_id: int) -> SessionState:
+    sessions = load_sessions()
+    key = str(chat_id)
+    if key in sessions:
+        d = sessions[key]
+        return SessionState(
+            chat_id=chat_id,
+            state=d.get("state", "idle"),
+            current_job_id=d.get("current_job_id"),
+            browser_session_id=d.get("browser_session_id"),
+            last_interaction=d.get("last_interaction", time.time()),
+        )
+    else:
+        session = SessionState(chat_id=chat_id)
+        sessions[key] = asdict(session)
+        save_sessions(sessions)
+        return session
 
 
-# ========== توابع API بله ==========
-def bale_request(method: str, params: Dict[str, Any] = None, files: Dict[str, Any] = None):
-    url = f"{BALE_API_BASE}/{method}"
+def update_session(session: SessionState):
+    sessions = load_sessions()
+    key = str(session.chat_id)
+    session.last_interaction = time.time()
+    sessions[key] = asdict(session)
+    save_sessions(sessions)
+
+
+# ==========================
+# مدیریت صف Jobها
+# ==========================
+
+def load_queue() -> Dict[str, Any]:
+    with queue_lock:
+        data = load_json_file(QUEUE_FILE, {"jobs": []})
+        if "jobs" not in data:
+            data["jobs"] = []
+        return data
+
+
+def save_queue(q: Dict[str, Any]):
+    with queue_lock:
+        save_json_file(QUEUE_FILE, q)
+
+
+def enqueue_job(job: Job):
+    q = load_queue()
+    q["jobs"].append(asdict(job))
+    save_queue(q)
+
+
+def find_job(job_id: str) -> Optional[Job]:
+    q = load_queue()
+    for j in q["jobs"]:
+        if j["job_id"] == job_id:
+            return Job(**j)
+    return None
+
+
+def update_job(job: Job):
+    q = load_queue()
+    found = False
+    for idx, j in enumerate(q["jobs"]):
+        if j["job_id"] == job.job_id:
+            q["jobs"][idx] = asdict(job)
+            found = True
+            break
+    if not found:
+        q["jobs"].append(asdict(job))
+    save_queue(q)
+
+
+def pop_next_queued_job() -> Optional[Job]:
+    q = load_queue()
+    for idx, j in enumerate(q["jobs"]):
+        if j["status"] == "queued":
+            job = Job(**j)
+            q["jobs"][idx]["status"] = "running"
+            q["jobs"][idx]["updated_at"] = time.time()
+            save_queue(q)
+            return job
+    return None
+
+
+def get_job_queue_position(job_id: str) -> Optional[int]:
+    q = load_queue()
+    position = 1
+    for j in q["jobs"]:
+        if j["status"] == "queued":
+            if j["job_id"] == job_id:
+                return position
+            position += 1
+    return None
+
+
+# ==========================
+# مدیریت Workerها
+# ==========================
+
+def load_workers() -> Dict[str, Any]:
+    with workers_lock:
+        data = load_json_file(WORKERS_FILE, {"workers": []})
+        if "workers" not in data or len(data["workers"]) != WORKER_COUNT:
+            # initialize
+            data["workers"] = []
+            for i in range(WORKER_COUNT):
+                w = WorkerInfo(worker_id=i, current_job_id=None, status="idle")
+                data["workers"].append(asdict(w))
+            save_json_file(WORKERS_FILE, data)
+        return data
+
+
+def save_workers(data: Dict[str, Any]):
+    with workers_lock:
+        save_json_file(WORKERS_FILE, data)
+
+
+def find_idle_worker() -> Optional[WorkerInfo]:
+    data = load_workers()
+    for w in data["workers"]:
+        if w["status"] == "idle":
+            return WorkerInfo(**w)
+    return None
+
+
+def set_worker_busy(worker_id: int, job_id: str):
+    data = load_workers()
+    for idx, w in enumerate(data["workers"]):
+        if w["worker_id"] == worker_id:
+            data["workers"][idx]["status"] = "busy"
+            data["workers"][idx]["current_job_id"] = job_id
+            break
+    save_workers(data)
+
+
+def set_worker_idle(worker_id: int):
+    data = load_workers()
+    for idx, w in enumerate(data["workers"]):
+        if w["worker_id"] == worker_id:
+            data["workers"][idx]["status"] = "idle"
+            data["workers"][idx]["current_job_id"] = None
+            break
+    save_workers(data)
+
+
+# ==========================
+# توابع کمکی Bot API بله
+# ==========================
+
+def bale_request(method: str, params: Optional[Dict[str, Any]] = None, files=None) -> Any:
+    url = f"{BALE_API_URL}/{method}"
     try:
         if files:
-            resp = requests.post(url, data=params or {}, files=files, timeout=60)
+            resp = requests.post(url, data=params or {}, files=files, timeout=REQUEST_TIMEOUT)
         else:
-            resp = requests.post(url, json=params or {}, timeout=60)
-        resp.raise_for_status()
+            resp = requests.post(url, json=params or {}, timeout=REQUEST_TIMEOUT)
+        if resp.status_code != 200:
+            safe_print(f"Bale API error {method}: {resp.status_code} {resp.text}")
+            return None
         data = resp.json()
-        if not data.get("ok", True):  # بسته به ساختار واقعی پاسخ بله
-            logging.error(f"Bale API error: {data}")
-        return data
+        if not data.get("ok", False):
+            safe_print(f"Bale API not ok {method}: {data}")
+            return None
+        return data["result"]
     except Exception as e:
-        logging.error(f"خطا در درخواست بله ({method}): {e}")
+        safe_print(f"Exception in bale_request {method}: {e}")
         return None
 
 
-def send_message(chat_id: int, text: str, reply_markup: Dict[str, Any] = None):
+def send_message(chat_id: int, text: str, reply_markup: Optional[Dict[str, Any]] = None):
     params = {"chat_id": chat_id, "text": text}
     if reply_markup:
-        params["reply_markup"] = reply_markup
-    return bale_request("sendMessage", params)
+        params["reply_markup"] = json.dumps(reply_markup)
+    return bale_request("sendMessage", params=params)
 
 
 def send_document(chat_id: int, file_path: str, caption: str = ""):
-    params = {"chat_id": chat_id, "caption": caption}
-    files = {
-        "document": open(file_path, "rb")
-    }
-    try:
+    with open(file_path, "rb") as f:
+        files = {
+            "document": (os.path.basename(file_path), f)
+        }
+        params = {"chat_id": chat_id}
+        if caption:
+            params["caption"] = caption
         return bale_request("sendDocument", params=params, files=files)
-    finally:
-        files["document"].close()
 
 
-def get_updates(offset: Optional[int]):
-    params = {
-        "timeout": POLL_TIMEOUT,
-    }
+def send_photo(chat_id: int, file_path: str, caption: str = ""):
+    with open(file_path, "rb") as f:
+        files = {
+            "photo": (os.path.basename(file_path), f)
+        }
+        params = {"chat_id": chat_id}
+        if caption:
+            params["caption"] = caption
+        return bale_request("sendPhoto", params=params, files=files)
+
+
+def answer_callback_query(callback_query_id: str, text: str = "", show_alert: bool = False):
+    params = {"callback_query_id": callback_query_id}
+    if text:
+        params["text"] = text
+    if show_alert:
+        params["show_alert"] = True
+    return bale_request("answerCallbackQuery", params=params)
+
+
+def get_updates(offset: Optional[int] = None, timeout: int = LONG_POLL_TIMEOUT) -> List[Dict[str, Any]]:
+    params = {"timeout": timeout}
     if offset is not None:
         params["offset"] = offset
-    url = f"{BALE_API_BASE}/getUpdates"
-    try:
-        resp = requests.get(url, params=params, timeout=POLL_TIMEOUT + 5)
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("result", [])
-    except Exception as e:
-        logging.error(f"خطا در getUpdates: {e}")
+    result = bale_request("getUpdates", params=params)
+    if result is None:
         return []
+    return result
 
 
-# ========== منوی شیشه‌ای (Inline Keyboard) ==========
+# ==========================
+# Inline Keyboard (منوی شیشه‌ای)
+# ==========================
+
 def main_menu_keyboard() -> Dict[str, Any]:
     return {
         "inline_keyboard": [
             [
-                {"text": "🖥 مرورگر من", "callback_data": "mode_browser"},
+                {"text": "🧭 مرورگر من", "callback_data": "menu_browser"},
             ],
             [
-                {"text": "📸 اسکرین‌شات از سایت", "callback_data": "mode_screenshot"},
+                {"text": "📸 اسکرین‌شات از سایت", "callback_data": "menu_screenshot"},
             ],
             [
-                {"text": "📥 دانلود محتوای سایت", "callback_data": "mode_download"},
+                {"text": "📥 دانلود محتوای سایت", "callback_data": "menu_download"},
             ],
             [
-                {"text": "❌ لغو پردازش", "callback_data": "cancel"},
+                {"text": "❌ لغو پردازش", "callback_data": "menu_cancel"},
             ],
         ]
     }
 
 
-# ========== تقسیم فایل ZIP به پارت‌های ۱۹.۵MB ==========
-def split_zip_if_needed(zip_path: str) -> List[str]:
-    """
-    اگر فایل زیپ بزرگ‌تر از ۲۰MB باشد، به پارت‌های ~۱۹.۵MB تقسیم می‌کند.
-    خروجی: لیست مسیر فایل‌های پارت شده یا [zip_path] اگر تقسیم نشود.
-    """
-    size_bytes = os.path.getsize(zip_path)
-    size_mb = size_bytes / (1024 * 1024)
+# ==========================
+# Playwright – ابزارهای اصلی
+# ==========================
 
-    if size_mb <= MAX_ZIP_SIZE_MB:
-        # نیاز به تقسیم نیست
+def setup_browser():
+    """
+    راه‌اندازی Playwright و کروم‌لِس (یا کرومیوم).
+    در GitHub Actions نیاز است قبلش playwright install در workflow اجرا شود.
+    """
+    playwright = sync_playwright().start()
+    browser = playwright.chromium.launch(
+        headless=True,
+        args=[
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--no-zygote",
+            "--disable-web-security",
+        ]
+    )
+    return playwright, browser
+
+
+def close_browser(playwright, browser):
+    try:
+        browser.close()
+    except Exception:
+        pass
+    try:
+        playwright.stop()
+    except Exception:
+        pass
+
+
+def take_fullpage_screenshot(url: str, out_path: str):
+    playwright, browser = setup_browser()
+    try:
+        page = browser.new_page(
+            viewport={"width": 1280, "height": 720},
+        )
+        page.goto(url, timeout=90000, wait_until="networkidle")
+        # کمی اسکرول برای لود lazy content
+        page.wait_for_timeout(3000)
+        page.screenshot(path=out_path, full_page=True)
+    finally:
+        close_browser(playwright, browser)
+
+
+def crawl_site_and_zip(url: str, out_zip_path: str, max_depth: int = 1, max_pages: int = 30):
+    """
+    دانلود ساده‌ی سایت (HTML + منابع استاتیک) تا عمق مشخص.
+    اینجا یک کراولر خیلی ساده می‌نویسیم که برای بیشتر سایت‌ها کفایت کند.
+    توجه: این یک دانلودر کامل HTTrack نیست، ولی برای نیاز پروژه کفایت می‌کند.
+    """
+    from urllib.parse import urlparse, urljoin
+    from bs4 import BeautifulSoup  # باید در requirements نصب شود
+
+    # dir موقت
+    work_dir = "site_tmp"
+    if os.path.exists(work_dir):
+        shutil.rmtree(work_dir)
+    os.makedirs(work_dir, exist_ok=True)
+
+    visited = set()
+    to_visit = queue.Queue()
+    to_visit.put((url, 0))
+
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+    })
+
+    parsed_root = urlparse(url)
+    root_netloc = parsed_root.netloc
+
+    page_count = 0
+
+    def save_binary(resource_url: str, base_dir: str):
+        try:
+            r = session.get(resource_url, timeout=30)
+            if r.status_code != 200:
+                return
+            rel_path = resource_url.split("://", 1)[-1]
+            # جلوگیری از خیلی طولانی شدن
+            rel_path = rel_path.replace("?", "_").replace("&", "_")
+            if len(rel_path) > 180:
+                rel_path = rel_path[:180]
+            full_path = os.path.join(base_dir, rel_path)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, "wb") as f:
+                f.write(r.content)
+        except Exception as e:
+            safe_print(f"save_binary error {resource_url}: {e}")
+
+    while not to_visit.empty():
+        url_cur, depth = to_visit.get()
+        if url_cur in visited:
+            continue
+        if depth > max_depth:
+            continue
+        visited.add(url_cur)
+        page_count += 1
+        if page_count > max_pages:
+            break
+
+        safe_print(f"Crawling {url_cur} (depth={depth})")
+        try:
+            resp = session.get(url_cur, timeout=40)
+        except Exception as e:
+            safe_print(f"Error fetching {url_cur}: {e}")
+            continue
+
+        if resp.status_code != 200:
+            continue
+
+        # ذخیره HTML
+        rel = url_cur.replace("://", "_").replace("/", "_").replace("?", "_").replace("&", "_")
+        if len(rel) > 150:
+            rel = rel[:150]
+        html_name = f"{rel}.html"
+        html_path = os.path.join(work_dir, html_name)
+        with open(html_path, "wb") as f:
+            f.write(resp.content)
+
+        # استخراج لینک‌ها و منابع
+        content_type = resp.headers.get("Content-Type", "")
+        if "html" not in content_type:
+            continue
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # لینک‌ها برای ادامه‌ی کراول
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            link = urljoin(url_cur, href)
+            p = urlparse(link)
+            if p.netloc == root_netloc and link not in visited:
+                if depth + 1 <= max_depth:
+                    to_visit.put((link, depth + 1))
+
+        # منابع: img, script, link rel=stylesheet
+        for img in soup.find_all("img", src=True):
+            src = urljoin(url_cur, img["src"])
+            save_binary(src, work_dir)
+        for s in soup.find_all("script", src=True):
+            src = urljoin(url_cur, s["src"])
+            save_binary(src, work_dir)
+        for l in soup.find_all("link", href=True):
+            rel_attr = (l.get("rel") or [""])[0]
+            if "stylesheet" in rel_attr or l["href"].endswith(".css"):
+                src = urljoin(url_cur, l["href"])
+                save_binary(src, work_dir)
+
+    # ساخت ZIP
+    with zipfile.ZipFile(out_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, dirs, files in os.walk(work_dir):
+            for file in files:
+                full = os.path.join(root, file)
+                arcname = os.path.relpath(full, work_dir)
+                zf.write(full, arcname)
+
+    # پاکسازی پوشه‌ی موقت
+    shutil.rmtree(work_dir, ignore_errors=True)
+
+
+# ==========================
+# تقسیم فایل ZIP به پارت
+# ==========================
+
+def split_zip_if_needed(zip_path: str, base_name: str) -> List[str]:
+    """
+    اگر zip_path بزرگ‌تر از ZIP_PART_SIZE باشد، آن را به پارت‌های site_partXX.zip تقسیم می‌کند.
+    خروجی: لیست مسیر فایل‌ها (پارت‌ها یا همان خود ZIP اگر کوچک بود).
+    """
+    size = os.path.getsize(zip_path)
+    if size <= ZIP_PART_SIZE:
         return [zip_path]
 
-    part_paths: List[str] = []
-    total_parts = math.ceil(size_bytes / SPLIT_PART_SIZE_BYTES)
-
-    base_dir = os.path.dirname(zip_path)
-    base_name = os.path.basename(zip_path)
-    name_no_ext, _ = os.path.splitext(base_name)
+    dir_name = os.path.dirname(zip_path) or "."
+    part_paths = []
 
     with open(zip_path, "rb") as f:
         part_index = 1
         while True:
-            chunk = f.read(SPLIT_PART_SIZE_BYTES)
+            chunk = f.read(ZIP_PART_SIZE)
             if not chunk:
                 break
-            part_name = f"{name_no_ext}_part{part_index:02d}.zip"
-            part_path = os.path.join(base_dir, part_name)
+            part_name = f"{base_name}_part{part_index:02d}.zip"
+            part_path = os.path.join(dir_name, part_name)
             with open(part_path, "wb") as pf:
                 pf.write(chunk)
             part_paths.append(part_path)
             part_index += 1
 
-    logging.info(f"فایل ZIP به {len(part_paths)} پارت تقسیم شد (کل پارت لازم: {total_parts}).")
     return part_paths
 
 
-# ========== جایگاه Playwright ==========
-# در مرحله بعدی این بخش را تکمیل می‌کنیم (اسکرین‌شات، دانلود کامل سایت، مرورگر من).
-# فعلاً اسکلت آماده می‌گذاریم تا ساختار اصلی bot.py کامل باشد.
+# ==========================
+# Worker – پردازش Jobها با Playwright
+# ==========================
 
-try:
-    from playwright.sync_api import sync_playwright
-    PLAYWRIGHT_AVAILABLE = True
-except ImportError:
-    PLAYWRIGHT_AVAILABLE = False
-    logging.warning("Playwright نصب نشده است. بخش مرورگر/اسکرین‌شات فعلاً کار نخواهد کرد.")
-
-
-def run_playwright_job(job: Dict[str, Any], mode: str, output_dir: str) -> Dict[str, Any]:
-    """
-    این تابع بعداً با منطق واقعی پر می‌شود:
-    - اگر mode == 'screenshot' → اسکرین‌شات فول‌پیج
-    - اگر mode == 'download' → دانلود HTML/CSS/JS/Images → ساخت ZIP
-    - اگر mode == 'browser' → مرورگر من (کنترل مرحله‌ای)
-    فعلاً یک اسکلت برمی‌گرداند.
-    """
-    result = {
-        "success": False,
-        "error": None,
-        "zip_path": None,
-        "screenshot_path": None,
-    }
-
-    if not PLAYWRIGHT_AVAILABLE:
-        result["error"] = "Playwright در محیط فعلی در دسترس نیست."
-        return result
-
-    url = job.get("url")
-    if not url:
-        result["error"] = "آدرس URL مشخص نشده است."
-        return result
-
-    # TODO: پیاده‌سازی کامل در مرحله بعد
-    result["error"] = "منطق Playwright هنوز پیاده‌سازی نشده است."
-    return result
-
-
-# ========== پردازش کار توسط ورکر ==========
-def worker_process_job(worker_id: int,
-                       job: Dict[str, Any],
-                       mode: str,
-                       session_mgr: SessionManager,
-                       queue_mgr: QueueManager,
-                       worker_mgr: WorkerManager):
-    user_id = job["user_id"]
-    chat_id = job["chat_id"]
-    job_id = job["job_id"]
-
-    logging.info(f"Worker {worker_id} شروع پردازش job {job_id} برای کاربر {user_id}")
-
-    session_mgr.update(user_id, state="processing", status="processing", job_id=job_id)
-
-    # اینجا منطق واقعی Playwright اجرا می‌شود:
-    # output_dir = os.path.join(DATA_DIR, "jobs", job_id)
-    # os.makedirs(output_dir, exist_ok=True)
-    # result = run_playwright_job(job, mode, output_dir)
-
-    # فعلاً شبیه‌سازی:
-    time.sleep(3)
-    dummy_zip_path = os.path.join(DATA_DIR, f"{job_id}.zip")
-    # یک فایل کوچک ساختگی برای تست:
-    with open(dummy_zip_path, "wb") as f:
-        f.write(os.urandom(500_000))  # حدود 0.5MB
-
-    # تقسیم فایل در صورت نیاز
-    part_paths = split_zip_if_needed(dummy_zip_path)
-
-    if len(part_paths) == 1:
-        send_message(chat_id, "✅ پردازش انجام شد. در حال ارسال فایل ZIP…")
-        send_document(chat_id, part_paths[0], caption="فایل ZIP سایت شما")
-    else:
-        send_message(chat_id,
-                     f"✅ پردازش انجام شد. فایل بزرگ بود (>{MAX_ZIP_SIZE_MB}MB)، "
-                     f"در {len(part_paths)} پارت ~{SPLIT_PART_SIZE_MB}MB تقسیم شد. در حال ارسال پارت‌ها…")
-
-        total = len(part_paths)
-        for idx, part in enumerate(part_paths, start=1):
-            send_message(chat_id, f"📦 در حال ارسال پارت {idx} از {total} …")
-            send_document(chat_id, part, caption=f"site_part{idx:02d}.zip")
-
-        send_message(chat_id,
-                     "✅ تمام پارت‌ها ارسال شد.\n"
-                     "همه‌ی پارت‌ها را در یک پوشه دانلود کنید و با ابزار unzip/extract آن‌ها را کنار هم باز کنید.")
-
-    # آزاد کردن ورکر
-    worker_mgr.release_worker(worker_id)
-    session_mgr.update(user_id, state="idle", status="done", job_id=None)
-    logging.info(f"Worker {worker_id} پردازش job {job_id} را تمام کرد.")
-
-    # بعد از پایان این job، اگر کسی در صف است، می‌توانیم در حلقه‌ی اصلی job بعدی را به یک ورکر آزاد بدهیم.
-    # فعلاً مدیریت صف در حلقه اصلی انجام می‌شود.
-
-
-# ========== مدیریت ورودی‌ها (پیام‌ها / callback ها) ==========
-def handle_start(chat_id: int, user_id: str, session_mgr: SessionManager):
-    session_mgr.update(user_id, state="idle", mode=None, last_url=None, job_id=None, status=None)
-    send_message(
-        chat_id,
-        "سلام! 👋\n"
-        "من ربات «مرور و دانلود سایت» هستم.\n"
-        "از منوی زیر یکی از گزینه‌ها را انتخاب کن:",
-        reply_markup=main_menu_keyboard(),
-    )
-
-
-def handle_text_message(chat_id: int, user_id: str, text: str,
-                        session_mgr: SessionManager,
-                        queue_mgr: QueueManager,
-                        worker_mgr: WorkerManager):
-    sess = session_mgr.get(user_id)
-    state = sess.get("state")
-    mode = sess.get("mode")
-
-    if text.startswith("/start"):
-        handle_start(chat_id, user_id, session_mgr)
-        return
-
-    if state == "waiting_for_url" and mode in ("screenshot", "download", "browser"):
-        url = text.strip()
-        # TODO: اعتبارسنجی ساده URL
-        job_id = str(uuid.uuid4())
-        sess = session_mgr.get(user_id)
-        sess["last_url"] = url
-        sess["job_id"] = job_id
-        sess["state"] = "in_queue"
-        sess["status"] = "queued"
-        session_mgr.save()
-
-        job = {
-            "job_id": job_id,
-            "user_id": user_id,
-            "chat_id": chat_id,
-            "url": url,
-            "mode": mode,
-            "created_at": time.time(),
-        }
-
-        # سعی می‌کنیم ببینیم آیا ورکر آزاد هست
-        idle_worker = worker_mgr.find_idle_worker()
-        if idle_worker is not None:
-            wid = idle_worker["id"]
-            worker_mgr.set_worker_job(wid, job_id, user_id)
-            send_message(chat_id, "✅ درخواست شما بلافاصله در حال پردازش است…")
-            # اجرای پردازش در یک نخ جداگانه:
-            t = threading.Thread(target=worker_process_job,
-                                 args=(wid, job, mode, session_mgr, queue_mgr, worker_mgr),
-                                 daemon=True)
-            t.start()
-        else:
-            # می‌رود در صف
-            queue_mgr.add_job(job)
-            pos = queue_mgr.get_position(job_id)
-            send_message(chat_id,
-                         f"درخواست شما در صف قرار گرفت. 🎫\n"
-                         f"موقعیت شما در صف: {pos}")
-        return
-
-    # اگر در حالت دیگری است و متن ارسال کرد:
-    send_message(chat_id,
-                 "پیام شما دریافت شد، اما الان منتظر URL نیستم.\n"
-                 "برای شروع دوباره /start را بفرست یا از منوی شیشه‌ای استفاده کن.",
-                 reply_markup=main_menu_keyboard())
-
-
-def handle_callback_query(callback_query: Dict[str, Any],
-                          session_mgr: SessionManager,
-                          queue_mgr: QueueManager,
-                          worker_mgr: WorkerManager):
-    cq_id = callback_query.get("id")
-    from_user = callback_query.get("from", {})
-    user_id = str(from_user.get("id"))
-    message = callback_query.get("message", {})
-    chat_id = message.get("chat", {}).get("id")
-    data = callback_query.get("data")
-
-    if not chat_id:
-        return
-
-    # اگر بله نیاز به answerCallbackQuery داشته باشد، باید اینجا صدا بزنیم.
-    # bale_request("answerCallbackQuery", {"callback_query_id": cq_id})
-
-    sess = session_mgr.get(user_id)
-
-    if data == "mode_browser":
-        session_mgr.update(user_id, mode="browser", state="waiting_for_url", status="await_url")
-        send_message(chat_id, "🔗 لطفاً آدرس سایت مورد نظر برای «مرورگر من» را بفرست.")
-    elif data == "mode_screenshot":
-        session_mgr.update(user_id, mode="screenshot", state="waiting_for_url", status="await_url")
-        send_message(chat_id, "📸 لطفاً آدرس سایت مورد نظر برای اسکرین‌شات فول‌پیج را بفرست.")
-    elif data == "mode_download":
-        session_mgr.update(user_id, mode="download", state="waiting_for_url", status="await_url")
-        send_message(chat_id, "📥 لطفاً آدرس سایت مورد نظر برای دانلود محتوای کامل را بفرست.")
-    elif data == "cancel":
-        job_id = sess.get("job_id")
-        if job_id:
-            # اول بررسی کنیم آیا در صف است
-            pos = queue_mgr.get_position(job_id)
-            if pos is not None:
-                # در صف است → حذف
-                queue_mgr.remove_job(job_id)
-                session_mgr.update(user_id, state="idle", status="cancelled", job_id=None)
-                send_message(chat_id, "❌ درخواست شما قبل از پردازش از صف حذف شد.")
-                return
-
-            # اگر در حال پردازش است، ورکر را پیدا کنیم:
-            w = worker_mgr.find_worker_by_job(job_id)
-            if w:
-                # در نسخه ساده: فقط فلگ می‌گذاریم و بعداً در منطق Playwright چک می‌کنیم
-                # فعلاً کار را ساده می‌گیریم و به کاربر پیام می‌دهیم که ممکن است چند لحظه طول بکشد.
-                send_message(chat_id,
-                             "⏳ درخواست لغو پردازش ارسال شد. "
-                             "ممکن است چند ثانیه طول بکشد تا پردازش متوقف و ورکر آزاد شود.")
-                # برای نسخه فعلی که کار ساختگی است، فرض می‌کنیم نصفه راه لغو نمی‌کنیم
-                # فقط پس از اتمام job، کاربر استیت idle می‌شود.
-            else:
-                send_message(chat_id, "در حال حاضر پردازشی برای لغو کردن پیدا نشد.")
-        else:
-            send_message(chat_id, "در حال حاضر پردازشی در جریان نیست که لغو شود.")
-    else:
-        send_message(chat_id, "دستور نامشخص بود.", reply_markup=main_menu_keyboard())
-
-
-# ========== حلقه اصلی Polling ==========
-def main():
-    logging.info("ربات شروع به کار کرد (polling)...")
-    session_mgr = SessionManager(SESSIONS_FILE)
-    queue_mgr = QueueManager(QUEUE_FILE)
-    worker_mgr = WorkerManager(WORKERS_FILE)
-
-    last_update_id = None
-
-    while True:
-        updates = get_updates(last_update_id + 1 if last_update_id else None)
-        for upd in updates:
-            last_update_id = upd.get("update_id", last_update_id)
-
-            if "message" in upd:
-                msg = upd["message"]
-                chat_id = msg["chat"]["id"]
-                from_user = msg.get("from", {})
-                user_id = str(from_user.get("id"))
-                text = msg.get("text", "")
-
-                handle_text_message(chat_id, user_id, text, session_mgr, queue_mgr, worker_mgr)
-
-            elif "callback_query" in upd:
-                handle_callback_query(upd["callback_query"], session_mgr, queue_mgr, worker_mgr)
-
-        # پس از پردازش آپدیت‌ها، اگر ورکر آزاد داریم و صف خالی نیست، job بعدی را بدهیم
-        idle_worker = worker_mgr.find_idle_worker()
-        while idle_worker is not None:
-            job = queue_mgr.pop_next()
+def worker_loop(worker_id: int, stop_event: threading.Event):
+    safe_print(f"[Worker {worker_id}] started")
+    while not stop_event.is_set():
+        # پیدا کردن Job در حال ران که به این ورکر assign شده
+        idle_worker = find_idle_worker()
+        if idle_worker and idle_worker.worker_id == worker_id:
+            # سعی کن یک job جدید از صف برداری
+            job = pop_next_queued_job()
             if job is None:
-                break
-            wid = idle_worker["id"]
-            worker_mgr.set_worker_job(wid, job["job_id"], job["user_id"])
-            send_message(job["chat_id"],
-                         "✅ نوبت شما رسید. درخواست شما وارد پردازش شد…")
-            t = threading.Thread(target=worker_process_job,
-                                 args=(wid, job, job["mode"], session_mgr, queue_mgr, worker_mgr),
-                                 daemon=True)
-            t.start()
-            idle_worker = worker_mgr.find_idle_worker()
+                # هیچ job در صف نیست
+                time.sleep(2)
+                continue
+            # این ورکر را busy کن
+            set_worker_busy(worker_id, job.job_id)
+            safe_print(f"[Worker {worker_id}] picked job {job.job_id}")
+            try:
+                process_job(worker_id, job)
+            except Exception as e:
+                safe_print(f"[Worker {worker_id}] ERROR processing job {job.job_id}: {e}")
+                traceback.print_exc()
+                job.status = "error"
+                job.error_message = str(e)
+                job.updated_at = time.time()
+                update_job(job)
+            finally:
+                set_worker_idle(worker_id)
+        else:
+            # این ورکر در فایل workers به عنوان busy ثبت شده یا داده هنوز sync نشده
+            time.sleep(2)
 
-        time.sleep(1)
+    safe_print(f"[Worker {worker_id}] stopped")
+
+
+def process_job(worker_id: int, job: Job):
+    """
+    اجرای واقعی Job بر اساس mode:
+    - screenshot: اسکرین‌شات فول پیج
+    - download: دانلود سایت و zip
+    - browser: فعلاً شبیه screenshot (فاز ۱)
+    """
+    chat_id = job.chat_id
+    mode = job.mode
+    url = job.url
+
+    send_message(chat_id, f"🔄 شروع پردازش ({mode}) برای URL:\n{url}")
+
+    # پوشه‌ی کاری اختصاصی برای هر job
+    job_dir = os.path.join("jobs_data", job.job_id)
+    os.makedirs(job_dir, exist_ok=True)
+
+    try:
+        if mode == "screenshot" or mode == "browser":
+            # Screenshot
+            screenshot_path = os.path.join(job_dir, "screenshot.png")
+            take_fullpage_screenshot(url, screenshot_path)
+            send_photo(chat_id, screenshot_path, caption=f"✅ اسکرین‌شات از:\n{url}")
+            job.status = "done"
+            job.updated_at = time.time()
+            update_job(job)
+
+        elif mode == "download":
+            # Download site
+            zip_path = os.path.join(job_dir, "site.zip")
+            crawl_site_and_zip(url, zip_path, max_depth=1, max_pages=30)
+            base_name = "site"
+            parts = split_zip_if_needed(zip_path, base_name)
+
+            if len(parts) == 1:
+                send_document(chat_id, parts[0], caption=f"✅ فایل ZIP سایت:\n{url}")
+            else:
+                send_message(chat_id, f"📦 سایت به {len(parts)} پارت تقسیم شد (حدوداً ۱۹.۵ مگابایت هر پارت).")
+                for idx, p in enumerate(parts, start=1):
+                    cap = f"پارت {idx} از {len(parts)} – محتواى سایت:\n{url}"
+                    send_document(chat_id, p, caption=cap)
+
+            job.status = "done"
+            job.updated_at = time.time()
+            update_job(job)
+
+        else:
+            send_message(chat_id, "❌ حالت ناشناخته برای job.")
+            job.status = "error"
+            job.error_message = "unknown mode"
+            job.updated_at = time.time()
+            update_job(job)
+
+    except Exception as e:
+        safe_print(f"[Worker {worker_id}] exception: {e}")
+        traceback.print_exc()
+        send_message(chat_id, f"❌ خطا در پردازش:\n{e}")
+        job.status = "error"
+        job.error_message = str(e)
+        job.updated_at = time.time()
+        update_job(job)
+
+    finally:
+        # پاک کردن پوشه job اگر خواستی
+        shutil.rmtree(job_dir, ignore_errors=True)
+        send_message(chat_id, "✅ پردازش به پایان رسید. برای شروع دوباره، /start را بزنید یا از منوی شیشه‌ای استفاده کن.")
+
+
+# ==========================
+# State Machine – مدیریت مکالمه
+# ==========================
+
+def handle_start_command(chat_id: int):
+    session = get_or_create_session(chat_id)
+    session.state = "idle"
+    session.current_job_id = None
+    update_session(session)
+
+    text = (
+        "سلام 👋\n"
+        "من ربات «مرورگر/دانلودر سایت» هستم.\n\n"
+        "از منوی شیشه‌ای زیر می‌تونی این کارها رو انجام بدی:\n"
+        "🧭 مرورگر من (فعلاً اسکرین‌شات از URL دلخواه)\n"
+        "📸 اسکرین‌شات از سایت\n"
+        "📥 دانلود محتوای سایت (HTML/CSS/JS/تصاویر در قالب ZIP)\n"
+        "❌ لغو پردازش\n"
+    )
+    send_message(chat_id, text, reply_markup=main_menu_keyboard())
+
+
+def create_job_id(chat_id: int) -> str:
+    return f"{chat_id}_{int(time.time()*1000)}"
+
+
+def queue_new_job(chat_id: int, mode: str, url: str) -> Job:
+    job_id = create_job_id(chat_id)
+    job = Job(job_id=job_id, chat_id=chat_id, mode=mode, url=url)
+    enqueue_job(job)
+    return job
+
+
+def check_and_assign_worker_for_new_job(job: Job):
+    # آیا worker خالی داریم؟
+    idle = find_idle_worker()
+    if idle:
+        # job در pop_next_queued_job انتخاب می‌شود، اینجا فقط نوتیف بده
+        pos = get_job_queue_position(job.job_id)
+        if pos is None or pos == 1:
+            send_message(job.chat_id, "✅ درخواستت در صف ثبت شد و به‌زودی توسط یکی از ورکرها پردازش می‌شود.")
+        else:
+            send_message(job.chat_id, f"✅ درخواستت در صف ثبت شد.\n🎫 نوبت فعلی شما: {pos}")
+    else:
+        pos = get_job_queue_position(job.job_id)
+        if pos is None:
+            pos = "؟"
+        send_message(job.chat_id, f"✅ درخواستت در صف ثبت شد.\n"
+                                  f"در حال حاضر {WORKER_COUNT} پردازش در حال اجراست.\n"
+                                  f"🎫 نوبت فعلی شما: {pos}")
+
+
+def handle_text_message(chat_id: int, text: str):
+    session = get_or_create_session(chat_id)
+
+    # اگر پیام /start است
+    if text.strip() == "/start":
+        handle_start_command(chat_id)
+        return
+
+    # بر اساس state رفتار کنیم
+    if session.state in ["waiting_url_screenshot", "waiting_url_download", "waiting_url_browser"]:
+        url = text.strip()
+        if not (url.startswith("http://") or url.startswith("https://")):
+            send_message(chat_id, "❌ لطفاً یک URL معتبر شروع‌شده با http:// یا https:// ارسال کن.")
+            return
+
+        if session.state == "waiting_url_screenshot":
+            mode = "screenshot"
+        elif session.state == "waiting_url_download":
+            mode = "download"
+        else:
+            mode = "browser"
+
+        job = queue_new_job(chat_id, mode, url)
+        session.current_job_id = job.job_id
+        session.state = "idle"
+        update_session(session)
+
+        check_and_assign_worker_for_new_job(job)
+    else:
+        # در حالت idle، اگر متن دلخواه فرستاد، منو را یادآوری کن
+        send_message(chat_id, "برای استفاده از ربات از منوی زیر استفاده کن:", reply_markup=main_menu_keyboard())
+
+
+def handle_callback_query(callback_query: Dict[str, Any]):
+    cq_id = callback_query["id"]
+    message = callback_query.get("message")
+    data = callback_query.get("data", "")
+    if not message:
+        answer_callback_query(cq_id, "پیام نامعتبر.")
+        return
+    chat_id = message["chat"]["id"]
+
+    session = get_or_create_session(chat_id)
+
+    if data == "menu_screenshot":
+        session.state = "waiting_url_screenshot"
+        update_session(session)
+        answer_callback_query(cq_id, "لینک سایتی که می‌خوای ازش اسکرین‌شات گرفته بشه رو بفرست.")
+        send_message(chat_id, "📸 لطفاً URL سایتی که می‌خوای ازش اسکرین‌شات گرفته بشه رو بفرست:")
+
+    elif data == "menu_download":
+        session.state = "waiting_url_download"
+        update_session(session)
+        answer_callback_query(cq_id, "لینک سایتی که می‌خوای دانلود بشه رو بفرست.")
+        send_message(chat_id, "📥 لطفاً URL سایتی که می‌خوای محتوایش دانلود شود را بفرست:")
+
+    elif data == "menu_browser":
+        session.state = "waiting_url_browser"
+        update_session(session)
+        answer_callback_query(cq_id, "لینک سایتی که می‌خوای باز بشه رو بفرست.")
+        send_message(chat_id, "🧭 لطفاً URL سایتی که می‌خوای در «مرورگر من» باز شود را بفرست.\n"
+                              "در این نسخه، نتیجه به صورت اسکرین‌شات فول‌پیج برات ارسال می‌شود.")
+
+    elif data == "menu_cancel":
+        # این نسخه فقط سشن را reset می‌کند. اگر خواستی می‌تونی job جاری را هم لغو کنی.
+        session.state = "idle"
+        session.current_job_id = None
+        update_session(session)
+        answer_callback_query(cq_id, "وضعیت فعلی پاک شد.")
+        send_message(chat_id, "✅ وضعیت فعلی پاک شد. از منوی شیشه‌ای، گزینه‌ی جدید انتخاب کن.", reply_markup=main_menu_keyboard())
+
+    else:
+        answer_callback_query(cq_id, "دستور ناشناخته.")
+        send_message(chat_id, "❌ دستور ناشناخته.", reply_markup=main_menu_keyboard())
+
+
+# ==========================
+# حلقه‌ی اصلی Polling
+# ==========================
+
+def polling_loop(stop_event: threading.Event):
+    offset = None
+    safe_print("[Polling] started")
+    while not stop_event.is_set():
+        try:
+            updates = get_updates(offset=offset, timeout=LONG_POLL_TIMEOUT)
+        except Exception as e:
+            safe_print(f"[Polling] get_updates error: {e}")
+            time.sleep(5)
+            continue
+
+        for upd in updates:
+            offset = upd["update_id"] + 1
+            try:
+                if "message" in upd:
+                    msg = upd["message"]
+                    chat_id = msg["chat"]["id"]
+                    if "text" in msg:
+                        text = msg["text"]
+                        handle_text_message(chat_id, text)
+                elif "callback_query" in upd:
+                    handle_callback_query(upd["callback_query"])
+            except Exception as e:
+                safe_print(f"[Polling] error handling update: {e}")
+                traceback.print_exc()
+
+    safe_print("[Polling] stopped")
+
+
+def ensure_dirs():
+    os.makedirs("jobs_data", exist_ok=True)
+
+
+def main():
+    ensure_dirs()
+
+    stop_event = threading.Event()
+
+    # راه‌اندازی ورکرها
+    worker_threads = []
+    for i in range(WORKER_COUNT):
+        t = threading.Thread(target=worker_loop, args=(i, stop_event), daemon=True)
+        t.start()
+        worker_threads.append(t)
+
+    # راه‌اندازی polling
+    polling_thread = threading.Thread(target=polling_loop, args=(stop_event,), daemon=True)
+    polling_thread.start()
+
+    safe_print("Bot started. Press Ctrl+C to stop.")
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        safe_print("Stopping...")
+        stop_event.set()
+        time.sleep(2)
 
 
 if __name__ == "__main__":
