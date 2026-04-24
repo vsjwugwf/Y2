@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ربات بله – نسخهٔ ۱۷ (Stable Enterprise)
-مرورگر دو حالته با stealth، اسکن ویدیو/فایل، دانلودر هوشمند،
-اسکرین‌شات 4K چندمرحله‌ای، ضبط ویدیو با سه رفتار،
-استخراج فرامین، سیستم اشتراک سه‌لایه، پنل ادمین،
-مدیریت کدهای اشتراک، خاموشی نرم، محدودیت‌های مصرف.
+ربات بله – نسخهٔ ۱۸ (Ultimate Explorer)
+مرورگر سه حالته با stealth، اسکن ویدیو/فایل، دانلودر هوشمند،
+اسکرین‌شات 4K چندمرحله‌ای، ضبط ویدیو با صدا و سه رفتار،
+استخراج فرامین، تحلیل هوشمند، تحلیل سورس، سیستم اشتراک سه‌لایه،
+پنل ادمین، مدیریت کدهای اشتراک، خاموشی نرم، محدودیت‌های مصرف.
 """
 
 import os, sys, json, time, math, queue, shutil, zipfile, uuid, re, hashlib
@@ -28,67 +28,46 @@ BALE_API_URL = "https://tapi.bale.ai/bot" + BALE_BOT_TOKEN
 REQUEST_TIMEOUT = 30
 LONG_POLL_TIMEOUT = 50
 WORKER_COUNT = 1
-ZIP_PART_SIZE = int(19 * 1024 * 1024)      # 19 MB
+ZIP_PART_SIZE = int(19 * 1024 * 1024)
 
 ADMIN_CHAT_ID = 46829437
 
-# ═══════════════════════ کدهای اشتراک پیش‌فرض (در صورت نبود فایل) ═══════════════════════
-DEFAULT_CODES = {
-    "bronze": ["B826USH","B83HSIW","B27627SGSH","BSUWH8272","B7272GS6",
+# ═══════════════════════ کدهای اشتراک پیش‌فرض ═══════════════════════
+DEFAULT_CODES = {"bronze": ["B826USH","B83HSIW","B27627SGSH","BSUWH8272","B7272GS6",
                "BHSWG827","BEJEJEI33","BI3U37EG","BEUEYE83HE","BRONZE10"],
     "plus":   ["P9282UE","PEIEUE7","P3IEUEHD8D","PEHEIEG883","P3IEHE7SG"],
     "pro":    ["PR282UEH","PR82HEBD8","PRUEGEI3E","PRHSU38EGD","PR83HEDH"]
 }
 
-# ═══════════════════════ محدودیت‌های مصرف (Rate Limits) ═══════════════════════
+# ═══════════════════════ محدودیت‌های مصرف ═══════════════════════
 LIMITS = {
     "free": {
-        "browser":       (2, 3600, None),
-        "screenshot":    (2, 3600, None),
-        "2x_screenshot": (0, 3600, None),
-        "4k_screenshot": (0, 3600, None),
-        "download":      (1, 3600, 10 * 1024 * 1024),
-        "record_video":  (0, 3600, None),
-        "scan_downloads":(0, 3600, None),
-        "scan_videos":   (0, 3600, None),
-        "download_website": (0, 3600, None),
-        "extract_commands": (0, 3600, None),
+        "browser": (2, 3600, None), "screenshot": (2, 3600, None),
+        "2x_screenshot": (0, 3600, None), "4k_screenshot": (0, 3600, None),
+        "download": (1, 3600, 10 * 1024 * 1024), "record_video": (0, 3600, None),
+        "scan_downloads": (0, 3600, None), "scan_videos": (0, 3600, None),
+        "download_website": (0, 3600, None), "extract_commands": (0, 3600, None),
     },
     "bronze": {
-        "browser":       (5, 3600, None),
-        "screenshot":    (2, 3600, None),
-        "2x_screenshot": (1, 3600, None),
-        "4k_screenshot": (1, 3600, None),
-        "download":      (2, 3600, 100 * 1024 * 1024),
-        "record_video":  (1, 3600, None),
-        "scan_downloads":(1, 3600, None),
-        "scan_videos":   (1, 3600, None),
-        "download_website": (0, 3600, None),
-        "extract_commands": (1, 3600, None),
+        "browser": (5, 3600, None), "screenshot": (2, 3600, None),
+        "2x_screenshot": (1, 3600, None), "4k_screenshot": (1, 3600, None),
+        "download": (2, 3600, 100 * 1024 * 1024), "record_video": (1, 3600, None),
+        "scan_downloads": (1, 3600, None), "scan_videos": (1, 3600, None),
+        "download_website": (0, 3600, None), "extract_commands": (1, 3600, None),
     },
     "plus": {
-        "browser":       (10, 3600, None),
-        "screenshot":    (10, 3600, None),
-        "2x_screenshot": (5, 3600, None),
-        "4k_screenshot": (3, 3600, None),
-        "download":      (5, 3600, 600 * 1024 * 1024),
-        "record_video":  (3, 3600, None),
-        "scan_downloads":(2, 3600, None),
-        "scan_videos":   (5, 3600, None),
-        "download_website": (1, 3600, None),
-        "extract_commands": (3, 3600, None),
+        "browser": (10, 3600, None), "screenshot": (10, 3600, None),
+        "2x_screenshot": (5, 3600, None), "4k_screenshot": (3, 3600, None),
+        "download": (5, 3600, 600 * 1024 * 1024), "record_video": (3, 3600, None),
+        "scan_downloads": (2, 3600, None), "scan_videos": (5, 3600, None),
+        "download_website": (1, 3600, None), "extract_commands": (3, 3600, None),
     },
     "pro": {
-        "browser":       (999, 3600, None),
-        "screenshot":    (999, 3600, None),
-        "2x_screenshot": (999, 3600, None),
-        "4k_screenshot": (999, 3600, None),
-        "download":      (999, 3600, None),
-        "record_video":  (999, 3600, None),
-        "scan_downloads":(999, 3600, None),
-        "scan_videos":   (999, 3600, None),
-        "download_website": (3, 86400, None),
-        "extract_commands": (999, 3600, None),
+        "browser": (999, 3600, None), "screenshot": (999, 3600, None),
+        "2x_screenshot": (999, 3600, None), "4k_screenshot": (999, 3600, None),
+        "download": (999, 3600, None), "record_video": (999, 3600, None),
+        "scan_downloads": (999, 3600, None), "scan_videos": (999, 3600, None),
+        "download_website": (3, 86400, None), "extract_commands": (999, 3600, None),
     },
 }
 
@@ -109,7 +88,7 @@ def safe_print(*args, **kwargs):
 class UserSettings:
     record_time: int = 20
     default_download_mode: str = "store"
-    browser_mode: str = "text"
+    browser_mode: str = "text"          # "text", "media", "explorer"
     deep_scan_mode: str = "logical"
     record_behavior: str = "click"
 
@@ -158,11 +137,8 @@ SERVICE_DISABLED_FLAG = "service_disabled.flag"
 
 def load_subscriptions() -> Dict[str, Any]:
     try:
-        with open(SUBSCRIPTIONS_FILE, "r") as f:
-            data = json.load(f)
-    except:
-        data = {}
-    # اطمینان از وجود کلید valid_codes با مقادیر پیش‌فرض
+        with open(SUBSCRIPTIONS_FILE, "r") as f: data = json.load(f)
+    except: data = {}
     if "valid_codes" not in data:
         data["valid_codes"] = DEFAULT_CODES.copy()
         save_subscriptions(data)
@@ -170,29 +146,22 @@ def load_subscriptions() -> Dict[str, Any]:
 
 def save_subscriptions(data: Dict[str, Any]):
     tmp = SUBSCRIPTIONS_FILE + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f)
+    with open(tmp, "w") as f: json.dump(data, f)
     os.replace(tmp, SUBSCRIPTIONS_FILE)
 
 def get_user_subscription(chat_id: int) -> Tuple[str, Optional[Dict[str, Any]]]:
     data = load_subscriptions()
     key = str(chat_id)
-    if key in data and "level" in data[key]:
-        return data[key]["level"], data[key]
+    if key in data and "level" in data[key]: return data[key]["level"], data[key]
     return "free", None
 
 def set_user_subscription(chat_id: int, level: str):
     with subscriptions_lock:
         data = load_subscriptions()
-        data[str(chat_id)] = {
-            "level": level,
-            "activated_at": time.time(),
-            "usage": {}
-        }
+        data[str(chat_id)] = {"level": level, "activated_at": time.time(), "usage": {}}
         save_subscriptions(data)
 
 def activate_subscription(chat_id: int, code: str) -> Optional[str]:
-    """بررسی کد و فعال‌سازی اشتراک. برمی‌گرداند سطح یا None"""
     code = code.strip()
     data = load_subscriptions()
     codes = data.get("valid_codes", DEFAULT_CODES)
@@ -210,10 +179,8 @@ def add_subscription_code(level: str, code: str) -> bool:
     with subscriptions_lock:
         data = load_subscriptions()
         codes = data.setdefault("valid_codes", DEFAULT_CODES.copy())
-        if level not in codes:
-            return False
-        if code in codes[level]:
-            return False   # تکراری
+        if level not in codes: return False
+        if code in codes[level]: return False
         codes[level].append(code)
         save_subscriptions(data)
         return True
@@ -237,45 +204,33 @@ def toggle_service():
         os.remove(SERVICE_DISABLED_FLAG)
         return False
     else:
-        with open(SERVICE_DISABLED_FLAG, "w") as f:
-            f.write("disabled")
+        with open(SERVICE_DISABLED_FLAG, "w") as f: f.write("disabled")
         return True
 
 def check_rate_limit(chat_id: int, mode: str, file_size_bytes: Optional[int] = None) -> Optional[str]:
-    """بررسی محدودیت مصرف. None = مجاز، str = پیام خطا"""
-    if chat_id == ADMIN_CHAT_ID:
-        return None
-
+    if chat_id == ADMIN_CHAT_ID: return None
     level, _ = get_user_subscription(chat_id)
     limits = LIMITS.get(level, LIMITS["free"])
 
-    # نگاشت mode به کلید محدودیت
     mode_key = mode
     if mode in ("browser", "browser_click"): mode_key = "browser"
-    elif mode in ("2x_screenshot", "4k_screenshot"): pass
-    elif mode == "screenshot": pass
     elif mode == "download": mode_key = "download"
     elif mode == "record_video": mode_key = "record_video"
     elif mode == "scan_videos": mode_key = "scan_videos"
     elif mode == "scan_downloads": mode_key = "scan_downloads"
     elif mode == "download_website": mode_key = "download_website"
     elif mode == "extract_commands": mode_key = "extract_commands"
-    else: mode_key = "other"
+    else: mode_key = mode
 
     limit = limits.get(mode_key)
-    if not limit:
-        return f"⛔ این قابلیت برای سطح «{level}» در دسترس نیست."
-
+    if not limit: return f"⛔ این قابلیت برای سطح «{level}» در دسترس نیست."
     max_count, window_seconds, max_size = limit
 
-    # چک حجم
     if max_size is not None and file_size_bytes is not None and file_size_bytes > max_size:
         max_mb = max_size / (1024 * 1024)
         return f"📦 حجم فایل ({file_size_bytes/(1024*1024):.1f}MB) بیش از حد مجاز ({max_mb:.0f}MB) برای سطح «{level}» است."
 
-    # اگر نامحدود است
     if max_count >= 999:
-        # ثبت مصرف
         update_usage(chat_id, mode_key)
         return None
 
@@ -284,18 +239,13 @@ def check_rate_limit(chat_id: int, mode: str, file_size_bytes: Optional[int] = N
     key = str(chat_id)
     user_data = data.get(key, {})
     usage = user_data.get("usage", {}).get(mode_key, [])
-
-    # پاک‌سازی رکوردهای خارج از پنجره
     cutoff = now - window_seconds
     recent = [t for t in usage if t > cutoff]
 
     if len(recent) >= max_count:
-        if window_seconds == 3600:
-            return f"⏰ محدودیت ساعتی: حداکثر {max_count} بار در ساعت (سطح «{level}»)."
-        else:
-            return f"⏰ محدودیت روزانه: حداکثر {max_count} بار در روز (سطح «{level}»)."
+        if window_seconds == 3600: return f"⏰ محدودیت ساعتی: حداکثر {max_count} بار در ساعت (سطح «{level}»)."
+        else: return f"⏰ محدودیت روزانه: حداکثر {max_count} بار در روز (سطح «{level}»)."
 
-    # ثبت مصرف جدید
     update_usage(chat_id, mode_key)
     return None
 
@@ -303,8 +253,7 @@ def update_usage(chat_id: int, mode: str):
     with subscriptions_lock:
         data = load_subscriptions()
         key = str(chat_id)
-        if key not in data:
-            data[key] = {"level": "free", "activated_at": time.time(), "usage": {}}
+        if key not in data: data[key] = {"level": "free", "activated_at": time.time(), "usage": {}}
         usage = data[key].setdefault("usage", {}).setdefault(mode, [])
         usage.append(time.time())
         save_subscriptions(data)
@@ -326,23 +275,16 @@ def get_session(chat_id):
         s = SessionState(chat_id=chat_id)
         d = data[key]
         for k, v in d.items():
-            if k == "settings":
-                s.settings = UserSettings(**v)
-            elif k in ("ad_blocked_domains", "found_downloads"):
-                setattr(s, k, v)
-            else:
-                setattr(s, k, v)
-        if s.chat_id == ADMIN_CHAT_ID:
-            s.is_admin = True
-            s.subscription = "pro"
+            if k == "settings": s.settings = UserSettings(**v)
+            elif k in ("ad_blocked_domains", "found_downloads"): setattr(s, k, v)
+            else: setattr(s, k, v)
+        if s.chat_id == ADMIN_CHAT_ID: s.is_admin = True; s.subscription = "pro"
         else:
             level, _ = get_user_subscription(chat_id)
             s.subscription = level
         return s
     s = SessionState(chat_id=chat_id)
-    if s.chat_id == ADMIN_CHAT_ID:
-        s.is_admin = True
-        s.subscription = "pro"
+    if s.chat_id == ADMIN_CHAT_ID: s.is_admin = True; s.subscription = "pro"
     return s
 def set_session(session):
     data = load_sessions()
@@ -357,10 +299,8 @@ def set_session(session):
 def bale_request(method, params=None, files=None):
     url = f"{BALE_API_URL}/{method}"
     try:
-        if files:
-            r = requests.post(url, data=params or {}, files=files, timeout=REQUEST_TIMEOUT)
-        else:
-            r = requests.post(url, json=params or {}, timeout=REQUEST_TIMEOUT)
+        if files: r = requests.post(url, data=params or {}, files=files, timeout=REQUEST_TIMEOUT)
+        else: r = requests.post(url, json=params or {}, timeout=REQUEST_TIMEOUT)
         if r.status_code != 200: return None
         data = r.json()
         if not data.get("ok"): return None
@@ -396,14 +336,13 @@ def main_menu_keyboard(is_admin=False, subscription="free"):
         [{"text": "⚙️ تنظیمات", "callback_data": "menu_settings"}],
         [{"text": "💀 لغو / ریست", "callback_data": "menu_cancel"}]
     ]
-    if is_admin:
-        keyboard.append([{"text": "🛠️ پنل ادمین", "callback_data": "menu_admin"}])
+    if is_admin: keyboard.append([{"text": "🛠️ پنل ادمین", "callback_data": "menu_admin"}])
     return {"inline_keyboard": keyboard}
 
 def settings_keyboard(settings: UserSettings):
     rec = settings.record_time
-    dlm  = "سریع ⚡" if settings.default_download_mode == "stream" else "عادی 💾"
-    mode = "🎬 مدیا" if settings.browser_mode == "media" else "📄 متن"
+    dlm = "سریع ⚡" if settings.default_download_mode == "stream" else "عادی 💾"
+    mode = {"text": "📄 متن", "media": "🎬 مدیا", "explorer": "🔍 جستجوگر"}[settings.browser_mode]
     deep = "🧠 منطقی" if settings.deep_scan_mode == "logical" else "🗑 همه چیز"
     rec_behavior = {"click": "🖱️ کلیک هوشمند", "scroll": "📜 اسکرول نرم", "live": "🎭 لایو کامند"}[settings.record_behavior]
     return {"inline_keyboard": [
@@ -460,10 +399,8 @@ def get_or_create_context(chat_id):
             _global_browser = _global_playwright.chromium.launch(
                 headless=True,
                 args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
+                    "--no-sandbox", "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage", "--disable-gpu",
                     "--disable-blink-features=AutomationControlled",
                     "--autoplay-policy=no-user-gesture-required",
                     "--disable-web-security",
@@ -476,8 +413,7 @@ def get_or_create_context(chat_id):
             try:
                 url = page.url.lower()
                 if any(kw in url for kw in BLOCKED_AD_KEYWORDS) or \
-                   any(ad in url for ad in AD_DOMAINS):
-                    page.close()
+                   any(ad in url for ad in AD_DOMAINS): page.close()
             except: pass
         context.on("page", handle_popup)
         if HAS_STEALTH:
@@ -495,7 +431,52 @@ def close_user_context(chat_id):
     if ctx:
         try: ctx["context"].close()
         except: pass
-# ═══════════════════════ استخراج المان‌ها ═══════════════════════
+
+# ═══════════════════════ ابزارهای صوتی (برای ضبط صدا) ═══════════════════════
+def has_audio_support() -> bool:
+    """بررسی وجود PulseAudio و parec"""
+    return shutil.which("pactl") is not None and shutil.which("parec") is not None
+
+def start_audio_capture(job_dir: str) -> Optional[subprocess.Popen]:
+    """شروع ضبط صدای سیستم با parec"""
+    if not has_audio_support():
+        safe_print("pulseaudio not available")
+        return None
+    try:
+        # راه‌اندازی pulseaudio
+        subprocess.run(["pulseaudio", "--start"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+        time.sleep(0.5)
+        # گرفتن نام منبع خروجی
+        result = subprocess.run(["pactl", "list", "short", "sources"], capture_output=True, text=True, timeout=5)
+        source_name = None
+        for line in result.stdout.splitlines():
+            if "alsa_output" in line and "monitor" in line:
+                source_name = line.split("\t")[1] if len(line.split("\t")) > 1 else None
+                break
+        if not source_name:
+            safe_print("no monitor source found")
+            return None
+        # شروع parec
+        audio_path = os.path.join(job_dir, "audio.raw")
+        proc = subprocess.Popen(
+            ["parec", "--device", source_name, "--format=s16le", "--rate=44100", "--channels=2", audio_path],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        safe_print(f"audio capture started on {source_name}")
+        return proc
+    except Exception as e:
+        safe_print(f"audio capture failed: {e}")
+        return None
+
+def stop_audio_capture(proc: Optional[subprocess.Popen], audio_path: str) -> bool:
+    """توقف ضبط صدا"""
+    if not proc: return False
+    try:
+        proc.terminate()
+        proc.wait(timeout=5)
+        return os.path.exists(audio_path) and os.path.getsize(audio_path) > 0
+    except: return False
+# ═══════════════════════ استخراج المان‌ها (سه حالته) ═══════════════════════
 def extract_clickable_and_media(page, mode="text"):
     if mode == "text":
         raw = page.evaluate("""() => {
@@ -507,13 +488,16 @@ def extract_clickable_and_media(page, mode="text"):
             document.querySelectorAll('a[href]').forEach(a => {
                 if (!isVisible(a)) return;
                 let t = a.textContent.trim() || 'لینک';
-                if (!seen.has(a.href)) { seen.add(a.href); items.push(['link', t, a.href]); }
+                let href = a.href;
+                try { href = new URL(a.getAttribute('href'), document.baseURI).href; } catch(e) {}
+                if (!seen.has(href)) { seen.add(href); items.push(['link', t, href]); }
             });
             return items;
         }""")
         links = [(t, txt, h) for t, txt, h in raw if h.startswith("http")]
         return links, []
-    else:  # media mode
+
+    elif mode == "media":
         video_sources = page.evaluate("""() => {
             const vids = [];
             document.querySelectorAll('video').forEach(v => {
@@ -526,11 +510,76 @@ def extract_clickable_and_media(page, mode="text"):
             return [...new Set(vids)].filter(u => u.startsWith('http'));
         }""")
         anchors = page.evaluate("""() => {
-            const a = []; document.querySelectorAll('a[href]').forEach(e => a.push(e.href));
-            return a.filter(h => h.startsWith('http'));
+            const a = []; document.querySelectorAll('a[href]').forEach(e => {
+                try { a.push(new URL(e.getAttribute('href'), document.baseURI).href); } catch(e) {}
+            });
+            return a.filter(h => h && h.startsWith('http'));
         }""")
         links = [("link", href.split("/")[-1][:20] or "لینک", href) for href in anchors[:20]]
         return links, video_sources
+
+    else:  # explorer mode – استخراج تمام المان‌های تعاملی
+        raw = page.evaluate("""() => {
+            const items = []; const seen = new Set();
+            function add(type, text, href) {
+                if (!href || seen.has(href)) return;
+                seen.add(href); items.push([type, text.trim().substring(0, 40), href]);
+            }
+            function isVisible(el) {
+                const s = window.getComputedStyle(el);
+                return s.display !== 'none' && s.visibility !== 'hidden' && el.offsetWidth > 0;
+            }
+            // تگ‌های <a>
+            document.querySelectorAll('a[href]').forEach(a => {
+                let t = a.textContent.trim() || 'لینک';
+                try {
+                    let href = new URL(a.getAttribute('href'), document.baseURI).href;
+                    add('link', t, href);
+                } catch(e) {}
+            });
+            // تگ‌های <button>
+            document.querySelectorAll('button').forEach(btn => {
+                if (!isVisible(btn)) return;
+                let t = btn.textContent.trim() || 'دکمه';
+                let formaction = btn.getAttribute('formaction') || '';
+                if (formaction) {
+                    try { formaction = new URL(formaction, document.baseURI).href; } catch(e) {}
+                    add('button', t, formaction);
+                } else {
+                    // دکمه‌های onclick
+                    let onclick = btn.getAttribute('onclick') || '';
+                    let match = onclick.match(/location\\.href=['"]([^'"]+)['"]/) || onclick.match(/window\\.open\\(['"]([^'"]+)['"]\\)/);
+                    if (match) add('button', t, match[1]);
+                }
+            });
+            // المان‌های با onclick
+            document.querySelectorAll('[onclick]').forEach(el => {
+                if (el.tagName === 'A' || el.tagName === 'BUTTON') return;
+                if (!isVisible(el)) return;
+                let onclick = el.getAttribute('onclick') || '';
+                let match = onclick.match(/location\\.href=['"]([^'"]+)['"]/) || onclick.match(/window\\.open\\(['"]([^'"]+)['"]\\)/);
+                if (match) add('element', el.textContent.trim().substring(0,30) || 'کلیک', match[1]);
+            });
+            // المان‌های با role="button"
+            document.querySelectorAll('[role="button"]').forEach(el => {
+                if (!isVisible(el)) return;
+                let t = el.textContent.trim().substring(0,30) || 'نقش';
+                let id = el.id ? '#'+el.id : '';
+                add('role', t, id);
+            });
+            // inputهای submit و button
+            document.querySelectorAll('input[type="submit"], input[type="button"]').forEach(inp => {
+                if (!isVisible(inp)) return;
+                let t = inp.value || 'ارسال';
+                let form = inp.closest('form');
+                let action = form ? form.getAttribute('action') || '' : '';
+                try { if (action) action = new URL(action, document.baseURI).href; } catch(e) {}
+                add('input', t, action || window.location.href);
+            });
+            return items;
+        }""")
+        links = [(t, txt, h) for t, txt, h in raw if h and (h.startswith("http") or h.startswith("/") or h.startswith("#"))]
+        return links, []
 
 def scan_videos_smart(page):
     elements = page.evaluate("""() => {
@@ -612,11 +661,10 @@ def scan_videos_smart(page):
     all_candidates.sort(key=lambda x: x["score"], reverse=True)
     return all_candidates
 
-# ═══════════════════════ اسکرول نرم و هوشمند ═══════════════════════
+# ═══════════════════════ اسکرول نرم ═══════════════════════
 def smooth_scroll_to_video(page):
     coords = page.evaluate("""() => {
-        let best = null;
-        let bestArea = 0;
+        let best = null; let bestArea = 0;
         document.querySelectorAll('video').forEach(v => {
             const rect = v.getBoundingClientRect();
             if (rect.width < 200 || rect.height < 150) return;
@@ -631,18 +679,15 @@ def smooth_scroll_to_video(page):
         });
         return best || { y: window.scrollY, x: 0, w: 0, h: 0 };
     }""")
-
     target_y = coords["y"]
     current_y = page.evaluate("window.scrollY")
     distance = target_y - current_y
     steps = max(10, abs(distance) // 30)
     step_size = distance / steps
-
     for i in range(steps):
         current_y += step_size
         page.evaluate(f"window.scrollTo(0, {int(current_y)})")
         page.wait_for_timeout(30)
-
     page.evaluate(f"window.scrollTo(0, {int(target_y)})")
     page.wait_for_timeout(100)
 
@@ -656,20 +701,16 @@ def is_direct_file_url(url: str) -> bool:
         '.webm','.ogg','.wav','.flac','.csv','.docx','.pptx','.m3u8'
     ]
     path = urlparse(url).path.lower()
-    if any(path.endswith(ext) for ext in known_extensions):
-        return True
+    if any(path.endswith(ext) for ext in known_extensions): return True
     filename = path.split('/')[-1]
     if '.' in filename:
         ext = filename.rsplit('.', 1)[-1]
-        if ext and re.match(r'^[a-zA-Z0-9_-]+$', ext) and len(ext) <= 10:
-            return True
+        if ext and re.match(r'^[a-zA-Z0-9_-]+$', ext) and len(ext) <= 10: return True
     return False
 
 def is_logical_download(url: str, size_bytes: Optional[int] = None) -> bool:
-    if is_direct_file_url(url):
-        return True
-    if size_bytes and size_bytes > 1024 * 1024:
-        return True
+    if is_direct_file_url(url): return True
+    if size_bytes and size_bytes > 1024 * 1024: return True
     return False
 
 def get_filename_from_url(url):
@@ -679,20 +720,15 @@ def get_filename_from_url(url):
 
 def crawl_for_download_link(start_url, max_depth=1, max_pages=10, timeout_seconds=30):
     visited = set()
-    q = queue.Queue()
-    q.put((start_url, 0))
-    s = requests.Session()
-    s.headers.update({"User-Agent": "Mozilla/5.0"})
-    pc = 0
-    start_time = time.time()
+    q = queue.Queue(); q.put((start_url, 0))
+    s = requests.Session(); s.headers.update({"User-Agent": "Mozilla/5.0"})
+    pc = 0; start_time = time.time()
     while not q.empty():
-        if time.time() - start_time > timeout_seconds:
-            break
+        if time.time() - start_time > timeout_seconds: break
         cur, depth = q.get()
         if cur in visited or depth > max_depth or pc > max_pages: continue
         visited.add(cur); pc += 1
-        try:
-            r = s.get(cur, timeout=10)
+        try: r = s.get(cur, timeout=10)
         except: continue
         if is_direct_file_url(cur): return cur
         if "text/html" in r.headers.get("Content-Type", ""):
@@ -700,8 +736,7 @@ def crawl_for_download_link(start_url, max_depth=1, max_pages=10, timeout_second
             for a in soup.find_all("a", href=True):
                 href = urljoin(cur, a["href"])
                 if is_direct_file_url(href): return href
-                if depth + 1 <= max_depth:
-                    q.put((href, depth+1))
+                if depth + 1 <= max_depth: q.put((href, depth+1))
     return None
 
 def split_file_binary(file_path, prefix, ext):
@@ -713,14 +748,11 @@ def split_file_binary(file_path, prefix, ext):
         while True:
             chunk = f.read(ZIP_PART_SIZE)
             if not chunk: break
-            if ext.lower() == ".zip":
-                pname = f"{prefix}.zip.{i:03d}"
-            else:
-                pname = f"{prefix}.part{i:03d}{ext}"
+            if ext.lower() == ".zip": pname = f"{prefix}.zip.{i:03d}"
+            else: pname = f"{prefix}.part{i:03d}{ext}"
             ppath = os.path.join(d, pname)
             with open(ppath, "wb") as pf: pf.write(chunk)
-            parts.append(ppath)
-            i += 1
+            parts.append(ppath); i += 1
     return parts
 
 def create_zip_and_split(src, base):
@@ -731,8 +763,7 @@ def create_zip_and_split(src, base):
         with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.write(src, os.path.basename(src))
     except: return []
-    if os.path.getsize(zp) <= ZIP_PART_SIZE:
-        return [zp]
+    if os.path.getsize(zp) <= ZIP_PART_SIZE: return [zp]
     parts = split_file_binary(zp, base, ".zip")
     os.remove(zp)
     return parts
@@ -767,8 +798,7 @@ def screenshot_4k(context, url, out):
 
 # ═══════════════════════ دانلود کامل سایت ═══════════════════════
 def download_full_website(job):
-    chat_id = job.chat_id
-    url = job.url
+    chat_id = job.chat_id; url = job.url
     job_dir = os.path.join("jobs_data", job.job_id)
     os.makedirs(job_dir, exist_ok=True)
     send_message(chat_id, "🌐 دانلود کامل وب‌سایت...")
@@ -780,8 +810,7 @@ def download_full_website(job):
                    "--recursive", "--level=1", "--accept", "html,css,js,jpg,jpeg,png,gif,svg,mp4,webm,pdf",
                    "--user-agent", ua, "--header", "Accept: */*", "--timeout", "30", "--tries", "2", url]
             if subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300).returncode == 0:
-                _finish_website_download(job, job_dir)
-                return
+                _finish_website_download(job, job_dir); return
         except: pass
     send_message(chat_id, "🔄 دانلود با مرورگر مخفی...")
     try:
@@ -790,8 +819,7 @@ def download_full_website(job):
         page.goto(url, timeout=60000, wait_until="domcontentloaded")
         page.wait_for_timeout(3000)
         html = page.content()
-        with open(os.path.join(job_dir, "index.html"), "w", encoding="utf-8") as f:
-            f.write(html)
+        with open(os.path.join(job_dir, "index.html"), "w", encoding="utf-8") as f: f.write(html)
         page.screenshot(path=os.path.join(job_dir, "screenshot.png"), full_page=True)
         page.close()
         _finish_website_download(job, job_dir)
@@ -804,23 +832,18 @@ def _finish_website_download(job, job_dir):
     chat_id = job.chat_id
     all_files = []
     for root, _, files in os.walk(job_dir):
-        for f in files:
-            all_files.append(os.path.join(root, f))
+        for f in files: all_files.append(os.path.join(root, f))
     if not all_files:
         send_message(chat_id, "❌ محتوایی یافت نشد.")
-        job.status = "error"; update_job(job)
-        return
+        job.status = "error"; update_job(job); return
     zp = os.path.join(job_dir, "website.zip")
     with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
-        for fp in all_files:
-            zf.write(fp, os.path.relpath(fp, job_dir))
+        for fp in all_files: zf.write(fp, os.path.relpath(fp, job_dir))
     parts = split_file_binary(zp, "website", ".zip") if os.path.getsize(zp) > ZIP_PART_SIZE else [zp]
     instr = os.path.join(job_dir, "merge.txt")
-    with open(instr, "w") as f:
-        f.write("همه‌ی فایل‌ها را دانلود کنید، سپس فایل .001 را با WinRAR یا 7-Zip باز کنید.")
+    with open(instr, "w") as f: f.write("همه‌ی فایل‌ها را دانلود کنید، سپس فایل .001 را با WinRAR یا 7-Zip باز کنید.")
     send_document(chat_id, instr, caption="📝 راهنما")
-    for idx, p in enumerate(parts, 1):
-        send_document(chat_id, p, caption=f"🌐 پارت {idx}/{len(parts)}")
+    for idx, p in enumerate(parts, 1): send_document(chat_id, p, caption=f"🌐 پارت {idx}/{len(parts)}")
     job.status = "done"; update_job(job)
     shutil.rmtree(job_dir, ignore_errors=True)
 # ═══════════════════════ صف و Worker ═══════════════════════
@@ -931,7 +954,7 @@ def worker_loop(worker_id, stop_event):
             finally: set_worker_idle(worker_id)
         else: time.sleep(2)
 
-# ═══════════════════════ هستهٔ پردازش Job (با Rate Limiting کامل) ═══════════════════════
+# ═══════════════════════ هستهٔ پردازش Job ═══════════════════════
 def process_job(worker_id, job):
     chat_id = job.chat_id
     session = get_session(chat_id)
@@ -978,6 +1001,12 @@ def process_job(worker_id, job):
             err = check_rate_limit(chat_id, "extract_commands")
             if err: send_message(chat_id, err); job.status = "cancelled"; update_job(job); return
         handle_extract_commands(job)
+        return
+    if job.mode == "smart_analyze":
+        handle_smart_analyze(job)
+        return
+    if job.mode == "source_analyze":
+        handle_source_analyze(job)
         return
     if job.mode == "download_all_found":
         handle_download_all_found(job)
@@ -1057,8 +1086,7 @@ def process_job(worker_id, job):
 
 # ═══════════════════════ دانلود هوشمند ═══════════════════════
 def handle_download(job, job_dir):
-    chat_id = job.chat_id
-    session = get_session(chat_id)
+    chat_id = job.chat_id; session = get_session(chat_id)
     url = job.url
     if is_direct_file_url(url):
         direct_link = url
@@ -1071,9 +1099,7 @@ def handle_download(job, job_dir):
             update_job(job); handle_blind_download(job)
             return
 
-    # تخمین حجم فایل و چک Rate Limit
-    size_bytes = None
-    size_str = "نامشخص"
+    size_bytes = None; size_str = "نامشخص"
     try:
         head = requests.head(direct_link, timeout=10, allow_redirects=True)
         if head.headers.get("Content-Length"):
@@ -1109,8 +1135,7 @@ def download_and_stream(url, fname, job_dir, chat_id):
                 ppath = os.path.join(job_dir, pname)
                 with open(ppath, "wb") as f: f.write(part)
                 send_document(chat_id, ppath, caption=f"⚡ پارت {idx}")
-                os.remove(ppath)
-                idx += 1
+                os.remove(ppath); idx += 1
         if buf:
             pname = f"{base}.part{idx:03d}{ext}"; ppath = os.path.join(job_dir, pname)
             with open(ppath, "wb") as f: f.write(buf)
@@ -1118,8 +1143,7 @@ def download_and_stream(url, fname, job_dir, chat_id):
             os.remove(ppath)
 
 def execute_download(job, job_dir):
-    chat_id = job.chat_id
-    extra = job.extra
+    chat_id = job.chat_id; extra = job.extra
     session = get_session(chat_id)
     mode = session.settings.default_download_mode
     pack_zip = extra.get("pack_zip", False)
@@ -1133,8 +1157,7 @@ def execute_download(job, job_dir):
         return
 
     fname = extra["filename"]
-    if "file_path" in extra:
-        fpath = extra["file_path"]
+    if "file_path" in extra: fpath = extra["file_path"]
     else:
         fpath = os.path.join(job_dir, fname)
         send_message(chat_id, "⏳ دانلود...")
@@ -1145,8 +1168,7 @@ def execute_download(job, job_dir):
     if not os.path.exists(fpath):
         send_message(chat_id, "❌ فایل یافت نشد."); job.status = "error"; update_job(job); return
 
-    if pack_zip:
-        parts = create_zip_and_split(fpath, fname); label = "ZIP"
+    if pack_zip: parts = create_zip_and_split(fpath, fname); label = "ZIP"
     else:
         base, ext = os.path.splitext(fname)
         parts = split_file_binary(fpath, base, ext); label = "اصلی"
@@ -1158,13 +1180,11 @@ def execute_download(job, job_dir):
         if pack_zip: f.write("همه‌ی فایل‌ها را دانلود کنید، سپس فایل .001 را با WinRAR یا 7-Zip باز کنید.")
         else: f.write(f"برای ادغام: copy /b {'+'.join([os.path.basename(p) for p in parts])} {fname}")
     send_document(chat_id, instr, caption="📝 راهنما")
-    for idx, p in enumerate(parts, 1):
-        send_document(chat_id, p, caption=f"{label} پارت {idx}/{len(parts)}")
+    for idx, p in enumerate(parts, 1): send_document(chat_id, p, caption=f"{label} پارت {idx}/{len(parts)}")
     job.status = "done"; update_job(job)
 
 def handle_blind_download(job):
-    chat_id = job.chat_id
-    session = get_session(chat_id)
+    chat_id = job.chat_id; session = get_session(chat_id)
     url = job.url
     job_dir = os.path.join("jobs_data", job.job_id)
     os.makedirs(job_dir, exist_ok=True)
@@ -1203,15 +1223,59 @@ def handle_blind_download(job):
         send_message(chat_id, f"❌ دانلود کور ناموفق: {e}")
         job.status = "error"; update_job(job)
         shutil.rmtree(job_dir, ignore_errors=True)
+
+# ═══════════════════════ دانلود همه فایل‌های پیدا شده ═══════════════════════
+def handle_download_all_found(job):
+    chat_id = job.chat_id; session = get_session(chat_id)
+    all_results = session.found_downloads or []
+    if not all_results:
+        send_message(chat_id, "🚫 فایلی برای دانلود وجود ندارد.")
+        job.status = "done"; update_job(job); return
+
+    job_dir = os.path.join("jobs_data", job.job_id)
+    os.makedirs(job_dir, exist_ok=True)
+    send_message(chat_id, f"📦 در حال دانلود {len(all_results)} فایل...")
+
+    downloaded_files = []
+    for i, f in enumerate(all_results):
+        try:
+            fname = get_filename_from_url(f['url'])
+            fpath = os.path.join(job_dir, fname)
+            counter = 1
+            while os.path.exists(fpath):
+                base, ext = os.path.splitext(fname)
+                fpath = os.path.join(job_dir, f"{base}_{counter}{ext}")
+                counter += 1
+            with requests.get(f['url'], stream=True, timeout=60, headers={"User-Agent":"Mozilla/5.0"}) as r:
+                r.raise_for_status()
+                with open(fpath, "wb") as fh:
+                    for chunk in r.iter_content(8192): fh.write(chunk)
+            downloaded_files.append(fpath)
+        except Exception as e: safe_print(f"download_all: failed {f['url']}: {e}")
+
+    if not downloaded_files:
+        send_message(chat_id, "❌ هیچ فایلی دانلود نشد.")
+        job.status = "error"; update_job(job)
+        shutil.rmtree(job_dir, ignore_errors=True)
+        return
+
+    zp = os.path.join(job_dir, "all_files.zip")
+    with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fp in downloaded_files: zf.write(fp, os.path.basename(fp))
+
+    parts = split_file_binary(zp, "all_files", ".zip") if os.path.getsize(zp) > ZIP_PART_SIZE else [zp]
+    instr = os.path.join(job_dir, "merge.txt")
+    with open(instr, "w") as f: f.write("همه‌ی فایل‌ها را دانلود کنید، سپس فایل .001 را با WinRAR یا 7-Zip باز کنید.")
+    send_document(chat_id, instr, caption="📝 راهنما")
+    for idx, p in enumerate(parts, 1): send_document(chat_id, p, caption=f"📦 پارت {idx}/{len(parts)}")
+    job.status = "done"; update_job(job)
+    shutil.rmtree(job_dir, ignore_errors=True)
 # ═══════════════════════ تشخیص موقعیت ویدیو ═══════════════════════
 def find_video_center(page):
-    """بزرگترین المان video/iframe قابل مشاهده را پیدا کرده و مختصات مرکز آن را برمی‌گرداند."""
     coords = page.evaluate("""() => {
         const centerX = window.innerWidth / 2;
         const centerY = window.innerHeight / 2;
-        let best = null;
-        let bestArea = 0;
-        
+        let best = null; let bestArea = 0;
         document.querySelectorAll('video').forEach(v => {
             const rect = v.getBoundingClientRect();
             if (rect.width < 200 || rect.height < 150) return;
@@ -1221,7 +1285,6 @@ def find_video_center(page):
                 best = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
             }
         });
-        
         document.querySelectorAll('iframe').forEach(f => {
             const rect = f.getBoundingClientRect();
             if (rect.width < 300 || rect.height < 200) return;
@@ -1231,17 +1294,14 @@ def find_video_center(page):
                 best = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
             }
         });
-        
         return best || { x: centerX, y: centerY };
     }""")
     return coords["x"], coords["y"]
 
-# ═══════════════════════ ضبط ویدیو (سه رفتار + صدا) ═══════════════════════
+# ═══════════════════════ ضبط ویدیو (با صدا و سه رفتار) ═══════════════════════
 def handle_record_video(job):
-    chat_id = job.chat_id
-    session = get_session(chat_id)
-    url = job.url
-    rec_time = session.settings.record_time
+    chat_id = job.chat_id; session = get_session(chat_id)
+    url = job.url; rec_time = session.settings.record_time
     behavior = session.settings.record_behavior
     job_dir = os.path.join("jobs_data", job.job_id)
     os.makedirs(job_dir, exist_ok=True)
@@ -1249,7 +1309,13 @@ def handle_record_video(job):
     behavior_names = {"click": "کلیک هوشمند", "scroll": "اسکرول نرم", "live": "لایو کامند"}
     send_message(chat_id, f"🎬 ضبط {rec_time} ثانیه ({behavior_names.get(behavior, behavior)})...")
 
+    audio_proc = None; audio_path = os.path.join(job_dir, "audio.raw")
+
     try:
+        # شروع ضبط صدا (اگر پشتیبانی بشه)
+        if has_audio_support():
+            audio_proc = start_audio_capture(job_dir)
+
         context = _global_browser.new_context(
             viewport={"width": 1280, "height": 720},
             record_video_dir=job_dir,
@@ -1257,7 +1323,6 @@ def handle_record_video(job):
         )
         page = context.new_page()
 
-        # اعمال فیلتر تبلیغات در صورت فعال بودن
         if session.ad_blocked_domains:
             parsed = urlparse(url)
             if parsed.netloc.lower() in session.ad_blocked_domains:
@@ -1265,7 +1330,6 @@ def handle_record_video(job):
                            if any(ad in route.request.url for ad in AD_DOMAINS)
                            else route.continue_())
 
-        # اگر در حالت live بود و need_scroll داشتیم
         need_scroll = (job.extra or {}).get("live_scroll", False)
 
         try:
@@ -1275,41 +1339,45 @@ def handle_record_video(job):
             if behavior == "scroll" or need_scroll:
                 smooth_scroll_to_video(page)
 
-            # کلیک هوشمند (برای click، scroll و live بدون دستور خاص)
             vx, vy = find_video_center(page)
             page.mouse.click(vx, vy)
 
-            # تلاش JS برای play()
-            try:
-                page.evaluate("() => { const v = document.querySelector('video'); if (v) v.play(); }")
+            try: page.evaluate("() => { const v = document.querySelector('video'); if (v) v.play(); }")
             except: pass
 
             page.wait_for_timeout(rec_time * 1000)
         finally:
-            page.close()
-            context.close()
+            page.close(); context.close()
+
+        # توقف ضبط صدا
+        audio_ok = stop_audio_capture(audio_proc, audio_path)
 
         # پیدا کردن فایل webm
         webm = None
         for f in os.listdir(job_dir):
-            if f.endswith('.webm'):
-                webm = os.path.join(job_dir, f); break
+            if f.endswith('.webm'): webm = os.path.join(job_dir, f); break
         if not webm:
             send_message(chat_id, "❌ ویدیویی ضبط نشد.")
-            job.status = "error"; update_job(job)
-            return
+            job.status = "error"; update_job(job); return
 
-        # تبدیل به mkv در صورت وجود ffmpeg
-        if shutil.which('ffmpeg'):
-            mkv_path = webm.replace('.webm', '.mkv')
+        final = webm
+        # اگر صدا ضبط شده، ترکیب کن
+        if audio_ok and shutil.which('ffmpeg'):
+            mkv_path = os.path.join(job_dir, "with_audio.mkv")
+            cmd = [
+                'ffmpeg', '-y',
+                '-i', webm,
+                '-f', 's16le', '-ar', '44100', '-ac', '2', '-i', audio_path,
+                '-c:v', 'copy', '-c:a', 'aac', '-shortest', mkv_path
+            ]
             try:
-                subprocess.run(['ffmpeg', '-y', '-i', webm, '-c', 'copy', mkv_path],
-                               check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
-                final = mkv_path if os.path.exists(mkv_path) else webm
+                subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+                if os.path.exists(mkv_path) and os.path.getsize(mkv_path) > 0:
+                    final = mkv_path
             except:
-                final = webm
-        else:
-            final = webm
+                safe_print("audio merge failed, sending webm without audio")
+        elif audio_ok and not shutil.which('ffmpeg'):
+            safe_print("ffmpeg not found, cannot merge audio")
 
         if os.path.getsize(final) > ZIP_PART_SIZE:
             parts = split_file_binary(final, "record", os.path.splitext(final)[1])
@@ -1324,15 +1392,13 @@ def handle_record_video(job):
     finally:
         shutil.rmtree(job_dir, ignore_errors=True)
 
-# ═══════════════════════ مرورگر (با دکمه‌های جدید) ═══════════════════════
+# ═══════════════════════ مرورگر (سه حالته) ═══════════════════════
 def handle_browser(job, job_dir):
-    chat_id = job.chat_id
-    session = get_session(chat_id)
+    chat_id = job.chat_id; session = get_session(chat_id)
     mode = session.settings.browser_mode
     ctx = get_or_create_context(chat_id)
     page = ctx.new_page()
 
-    # اعمال فیلتر تبلیغات اگر دامنه مسدود باشد
     parsed_url = urlparse(job.url)
     if parsed_url.netloc.lower() in (session.ad_blocked_domains or []):
         page.route("**/*", lambda route: route.abort()
@@ -1368,20 +1434,16 @@ def send_browser_page(chat_id, image_path=None, url="", page_num=0):
     session = get_session(chat_id)
     all_links = session.browser_links or []
     per_page = 10
-    start = page_num * per_page
-    end = min(start + per_page, len(all_links))
+    start = page_num * per_page; end = min(start + per_page, len(all_links))
     page_links = all_links[start:end]
 
-    keyboard_rows = []
-    idx = start
-    row = []
+    keyboard_rows = []; idx = start; row = []
     for link in page_links:
         label = link["text"][:20]
         cb = f"nav_{chat_id}_{idx}" if link["type"] != "video" else f"dlvid_{chat_id}_{idx}"
         with callback_map_lock: callback_map[cb] = link["href"]
         row.append({"text": label, "callback_data": cb})
-        if len(row) == 2:
-            keyboard_rows.append(row); row = []
+        if len(row) == 2: keyboard_rows.append(row); row = []
         idx += 1
     if row: keyboard_rows.append(row)
 
@@ -1390,9 +1452,8 @@ def send_browser_page(chat_id, image_path=None, url="", page_num=0):
     if end < len(all_links): nav.append({"text": "▶️", "callback_data": f"bpg_{chat_id}_{page_num+1}"})
     if nav: keyboard_rows.append(nav)
 
-    # دکمه‌های ویژه بر اساس حالت و اشتراک
-    sub = session.subscription
-    if session.settings.browser_mode == "media":
+    sub = session.subscription; mode = session.settings.browser_mode
+    if mode == "media":
         if sub in ("plus", "pro", "admin"):
             keyboard_rows.append([{"text": "🎬 اسکن ویدیوها", "callback_data": f"scvid_{chat_id}"}])
         parsed_url = urlparse(url)
@@ -1400,11 +1461,14 @@ def send_browser_page(chat_id, image_path=None, url="", page_num=0):
         is_blocked = current_domain in (session.ad_blocked_domains or [])
         ad_text = "🛡️ تبلیغات: روشن" if is_blocked else "🛡️ تبلیغات: خاموش"
         keyboard_rows.append([{"text": ad_text, "callback_data": f"adblock_{chat_id}"}])
-    else:
+    elif mode == "explorer":
+        if sub in ("plus", "pro", "admin"):
+            keyboard_rows.append([{"text": "🔍 تحلیل هوشمند", "callback_data": f"sman_{chat_id}"}])
+            keyboard_rows.append([{"text": "🕵️ تحلیل سورس", "callback_data": f"srcan_{chat_id}"}])
+    else:  # text
         if sub in ("plus", "pro", "admin"):
             keyboard_rows.append([{"text": "📦 جستجوی فایل‌ها", "callback_data": f"scdl_{chat_id}"}])
 
-    # دکمه‌های مشترک
     if sub in ("plus", "pro", "admin"):
         keyboard_rows.append([{"text": "📋 استخراج فرامین", "callback_data": f"extcmd_{chat_id}"}])
     if sub in ("plus", "pro", "admin"):
@@ -1414,26 +1478,21 @@ def send_browser_page(chat_id, image_path=None, url="", page_num=0):
     keyboard_rows.append([{"text": "❌ بستن", "callback_data": f"closebrowser_{chat_id}"}])
 
     kb = {"inline_keyboard": keyboard_rows}
-    if image_path:
-        send_document(chat_id, image_path, caption=f"🌐 {url}")
+    if image_path: send_document(chat_id, image_path, caption=f"🌐 {url}")
     send_message(chat_id, f"صفحه {page_num+1}/{math.ceil(len(all_links)/per_page)}", reply_markup=kb)
 
     extra = all_links[end:]
     if extra:
-        cmds = {}
-        lines = ["🔹 لینک‌های بیشتر:"]
+        cmds = {}; lines = ["🔹 لینک‌های بیشتر:"]
         for i, link in enumerate(extra):
             cmd = f"/a{hashlib.md5(link['href'].encode()).hexdigest()[:5]}"
-            cmds[cmd] = link['href']
-            lines.append(f"{cmd} : {link['text']}")
+            cmds[cmd] = link['href']; lines.append(f"{cmd} : {link['text']}")
         send_message(chat_id, "\n".join(lines))
-        session.text_links = cmds
-        set_session(session)
+        session.text_links = cmds; set_session(session)
 
 # ═══════════════════════ اسکن ویدیوها ═══════════════════════
 def handle_scan_videos(job):
-    chat_id = job.chat_id
-    session = get_session(chat_id)
+    chat_id = job.chat_id; session = get_session(chat_id)
     ctx = get_or_create_context(chat_id)
     page = ctx.new_page()
     try:
@@ -1442,15 +1501,11 @@ def handle_scan_videos(job):
         videos = scan_videos_smart(page)
         if not videos:
             send_message(chat_id, "🚫 هیچ ویدیویی یافت نشد.")
-            job.status = "done"; update_job(job)
-            return
-        lines = [f"🎬 **{len(videos)} ویدیو یافت شد:**"]
-        cmds = {}
+            job.status = "done"; update_job(job); return
+        lines = [f"🎬 **{len(videos)} ویدیو یافت شد:**"]; cmds = {}
         for i, vid in enumerate(videos[:15]):
             cmd = f"/o{hashlib.md5(vid['href'].encode()).hexdigest()[:5]}"
-            cmds[cmd] = vid['href']
-            lines.append(f"{i+1}. {vid['text']}")
-            lines.append(f"   📥 {cmd}")
+            cmds[cmd] = vid['href']; lines.append(f"{i+1}. {vid['text']}"); lines.append(f"   📥 {cmd}")
         send_message(chat_id, "\n".join(lines))
         session.text_links = {**session.text_links, **cmds} if session.text_links else cmds
         set_session(session)
@@ -1458,43 +1513,122 @@ def handle_scan_videos(job):
     except Exception as e:
         send_message(chat_id, f"❌ خطا: {e}")
         job.status = "error"; update_job(job)
-    finally:
-        page.close()
+    finally: page.close()
+
+# ═══════════════════════ تحلیل هوشمند (Smart Analyze) – مخصوص Explorer ═══════════════════════
+def handle_smart_analyze(job):
+    chat_id = job.chat_id; session = get_session(chat_id)
+    all_links = session.browser_links or []
+    if not all_links:
+        send_message(chat_id, "🚫 لینکی برای تحلیل وجود ندارد.")
+        job.status = "done"; update_job(job); return
+
+    videos = [l for l in all_links if is_direct_file_url(l["href"]) and
+              any(l["href"].lower().endswith(e) for e in ('.mp4','.webm','.mkv','.m3u8','.mpd','.mov','.avi'))]
+    files = [l for l in all_links if is_direct_file_url(l["href"]) and l not in videos]
+    pages = [l for l in all_links if l not in videos and l not in files]
+
+    cmds = {}
+    def send_category(title, items, prefix):
+        if not items: return
+        lines = [f"**{title} ({len(items)}):**"]
+        for i, item in enumerate(items):
+            cmd = f"/{prefix}{hashlib.md5(item['href'].encode()).hexdigest()[:5]}"
+            cmds[cmd] = item['href']
+            lines.append(f"{cmd} : {item['text'][:40]}\n🔗 {item['href'][:80]}")
+        send_message(chat_id, "\n".join(lines))
+
+    send_category("🎬 ویدیوها", videos, "H")
+    send_category("📦 فایل‌ها", files, "H")
+    send_category("📄 صفحات", pages[:20], "H")
+
+    if pages[20:]:
+        lines = ["🔹 **بقیه صفحات:**"]
+        for item in pages[20:]:
+            cmd = f"/H{hashlib.md5(item['href'].encode()).hexdigest()[:5]}"
+            cmds[cmd] = item['href']; lines.append(f"{cmd} : {item['text'][:40]}")
+        send_message(chat_id, "\n".join(lines))
+
+    session.text_links = {**session.text_links, **cmds} if session.text_links else cmds
+    set_session(session)
+    job.status = "done"; update_job(job)
+
+# ═══════════════════════ تحلیل سورس (Source Analyzer) – مخصوص Explorer ═══════════════════════
+def handle_source_analyze(job):
+    chat_id = job.chat_id; session = get_session(chat_id)
+    ctx = get_or_create_context(chat_id)
+    page = ctx.new_page()
+    try:
+        page.goto(session.browser_url, timeout=60000, wait_until="domcontentloaded")
+        page.wait_for_timeout(2000)
+        html = page.content()
+
+        soup = BeautifulSoup(html, "html.parser")
+        found_urls = set()
+
+        # تمام hrefها و srcها
+        for tag in soup.find_all(["a", "link", "script", "img", "iframe", "source", "video", "audio"]):
+            for attr in ("href", "src", "data-url", "data-href", "data-link"):
+                val = tag.get(attr)
+                if val:
+                    try: found_urls.add(urljoin(session.browser_url, val))
+                    except: pass
+
+        # URLهای داخل اسکریپت‌ها
+        for script in soup.find_all("script"):
+            if script.string:
+                matches = re.findall(r'https?://[^\s"\'<>]+', script.string)
+                for m in matches: found_urls.add(m)
+
+        # حذف تبلیغات
+        clean_urls = [u for u in found_urls if not any(ad in u for ad in AD_DOMAINS) and
+                      not any(kw in u.lower() for kw in BLOCKED_AD_KEYWORDS)]
+
+        if not clean_urls:
+            send_message(chat_id, "🚫 هیچ لینک مخفی یافت نشد.")
+            job.status = "done"; update_job(job); return
+
+        cmds = {}; lines = [f"🕵️ **{len(clean_urls)} لینک از سورس استخراج شد:**"]
+        for i, url in enumerate(clean_urls[:30]):
+            cmd = f"/H{hashlib.md5(url.encode()).hexdigest()[:5]}"
+            cmds[cmd] = url
+            label = urlparse(url).path.split("/")[-1][:30] or url[:40]
+            lines.append(f"{cmd} : {label}\n🔗 {url[:80]}")
+
+        send_message(chat_id, "\n".join(lines))
+        session.text_links = {**session.text_links, **cmds} if session.text_links else cmds
+        set_session(session)
+        job.status = "done"; update_job(job)
+    except Exception as e:
+        send_message(chat_id, f"❌ خطا: {e}")
+        job.status = "error"; update_job(job)
+    finally: page.close()
 
 # ═══════════════════════ جستجوی فایل‌ها (سه مرحله‌ای) ═══════════════════════
 def handle_scan_downloads(job):
-    chat_id = job.chat_id
-    session = get_session(chat_id)
+    chat_id = job.chat_id; session = get_session(chat_id)
     url = session.browser_url
     if not url:
-        send_message(chat_id, "❌ صفحه‌ای برای جستجو باز نیست.")
-        return
+        send_message(chat_id, "❌ صفحه‌ای برای جستجو باز نیست."); return
 
     deep_mode = session.settings.deep_scan_mode
     send_message(chat_id, f"🔎 جستجوی فایل‌ها (حالت: {deep_mode})...")
 
-    found_links: Set[str] = set()
-    all_results: List[Dict[str, str]] = []
+    found_links: Set[str] = set(); all_results: List[Dict[str, str]] = []
 
     def add_result(link: str):
         if link in found_links: return
         found_links.add(link)
-        fname = get_filename_from_url(link)
-        size_str = "نامشخص"
-        size_bytes = None
+        fname = get_filename_from_url(link); size_str = "نامشخص"; size_bytes = None
         try:
             head = requests.head(link, timeout=5, allow_redirects=True)
             if head.headers.get("Content-Length"):
                 size_bytes = int(head.headers.get("Content-Length"))
                 size_str = f"{size_bytes/1024/1024:.2f} MB"
         except: pass
-
-        if deep_mode == "logical" and not is_logical_download(link, size_bytes):
-            return
-
+        if deep_mode == "logical" and not is_logical_download(link, size_bytes): return
         all_results.append({"name": fname[:35], "url": link, "size": size_str})
 
-    # --- مرحله ۱: مستقیم از صفحه ---
     start_time = time.time()
     try:
         ctx = get_or_create_context(chat_id)
@@ -1510,20 +1644,15 @@ def handle_scan_downloads(job):
             parsed = urlparse(href)
             if any(ad in parsed.netloc for ad in AD_DOMAINS): continue
             if any(kw in href.lower() for kw in BLOCKED_AD_KEYWORDS): continue
-            if is_direct_file_url(href):
-                add_result(href)
+            if is_direct_file_url(href): add_result(href)
         elapsed = time.time() - start_time
-        if all_results:
-            send_message(chat_id, f"✅ مرحله ۱: {len(all_results)} فایل ({elapsed:.1f}s)")
-    except Exception as e:
-        safe_print(f"scan_downloads stage1 error: {e}")
+        if all_results: send_message(chat_id, f"✅ مرحله ۱: {len(all_results)} فایل ({elapsed:.1f}s)")
+    except Exception as e: safe_print(f"scan_downloads stage1 error: {e}")
 
-    # --- مرحله ۲: کراول سبک ---
     if not all_results and time.time() - start_time < 60:
         send_message(chat_id, "🔄 مرحله ۲: کراول سبک...")
         try:
-            s = requests.Session()
-            s.headers.update({"User-Agent": "Mozilla/5.0"})
+            s = requests.Session(); s.headers.update({"User-Agent": "Mozilla/5.0"})
             resp = s.get(url, timeout=10)
             if resp.status_code == 200 and "text/html" in resp.headers.get("Content-Type", ""):
                 soup = BeautifulSoup(resp.text, "html.parser")
@@ -1533,39 +1662,29 @@ def handle_scan_downloads(job):
                     parsed = urlparse(href)
                     if any(ad in parsed.netloc for ad in AD_DOMAINS): continue
                     if any(kw in href.lower() for kw in BLOCKED_AD_KEYWORDS): continue
-                    if is_direct_file_url(href):
-                        add_result(href)
-                    else:
-                        links_to_crawl.append(href)
-
+                    if is_direct_file_url(href): add_result(href)
+                    else: links_to_crawl.append(href)
                 for link in links_to_crawl[:15]:
                     if time.time() - start_time > 60: break
                     found = crawl_for_download_link(link, max_depth=1, max_pages=5, timeout_seconds=10)
-                    if found:
-                        add_result(found)
+                    if found: add_result(found)
                 elapsed = time.time() - start_time
                 send_message(chat_id, f"✅ مرحله ۲: مجموعاً {len(all_results)} فایل ({elapsed:.1f}s)")
-        except Exception as e:
-            safe_print(f"scan_downloads stage2 error: {e}")
+        except Exception as e: safe_print(f"scan_downloads stage2 error: {e}")
 
     if not all_results:
         send_message(chat_id, "🚫 هیچ فایل قابل دانلودی یافت نشد.")
-        job.status = "done"; update_job(job)
-        return
+        job.status = "done"; update_job(job); return
 
-    session.found_downloads = all_results
-    session.found_downloads_page = 0
+    session.found_downloads = all_results; session.found_downloads_page = 0
     set_session(session)
-
     send_found_downloads_page(chat_id, 0)
     job.status = "done"; update_job(job)
 
 def send_found_downloads_page(chat_id, page_num=0):
     session = get_session(chat_id)
     all_results = session.found_downloads or []
-    per_page = 10
-    start = page_num * per_page
-    end = min(start + per_page, len(all_results))
+    per_page = 10; start = page_num * per_page; end = min(start + per_page, len(all_results))
     page_results = all_results[start:end]
 
     lines = [f"📦 **فایل‌های یافت‌شده (صفحه {page_num+1}/{math.ceil(len(all_results)/per_page)}):**"]
@@ -1577,12 +1696,9 @@ def send_found_downloads_page(chat_id, page_num=0):
         lines.append(f"{idx+1}. {f['name']} ({f['size']})")
         lines.append(f"   📥 {cmd}    🔗 {f['url'][:60]}")
 
-    keyboard_rows = []
-    nav = []
-    if page_num > 0:
-        nav.append({"text": "◀️ قبلی", "callback_data": f"dfpg_{chat_id}_{page_num-1}"})
-    if end < len(all_results):
-        nav.append({"text": "بعدی ▶️", "callback_data": f"dfpg_{chat_id}_{page_num+1}"})
+    keyboard_rows = []; nav = []
+    if page_num > 0: nav.append({"text": "◀️ قبلی", "callback_data": f"dfpg_{chat_id}_{page_num-1}"})
+    if end < len(all_results): nav.append({"text": "بعدی ▶️", "callback_data": f"dfpg_{chat_id}_{page_num+1}"})
     if nav: keyboard_rows.append(nav)
     keyboard_rows.append([{"text": "📦 دانلود همه (ZIP)", "callback_data": f"dlall_{chat_id}"}])
     keyboard_rows.append([{"text": "❌ بستن", "callback_data": "close_downloads"}])
@@ -1593,22 +1709,18 @@ def send_found_downloads_page(chat_id, page_num=0):
 
 # ═══════════════════════ استخراج فرامین (با لینک کامل) ═══════════════════════
 def handle_extract_commands(job):
-    chat_id = job.chat_id
-    session = get_session(chat_id)
+    chat_id = job.chat_id; session = get_session(chat_id)
     all_links = session.browser_links or []
     if not all_links:
         send_message(chat_id, "🚫 لینکی برای استخراج وجود ندارد.")
-        job.status = "done"; update_job(job)
-        return
+        job.status = "done"; update_job(job); return
 
-    cmds = {}
-    lines = [f"📋 **{len(all_links)} فرمان استخراج شد:**"]
+    cmds = {}; lines = [f"📋 **{len(all_links)} فرمان استخراج شد:**"]
     for i, link in enumerate(all_links):
         cmd = f"/H{hashlib.md5(link['href'].encode()).hexdigest()[:5]}"
         cmds[cmd] = link['href']
         line = f"{cmd} : {link['text'][:40]}\n🔗 {link['href'][:80]}"
         lines.append(line)
-
         if (i + 1) % 15 == 0 or i == len(all_links) - 1:
             send_message(chat_id, "\n".join(lines))
             lines = [f"📋 **ادامه فرامین ({i+1}/{len(all_links)}):**"]
@@ -1617,68 +1729,13 @@ def handle_extract_commands(job):
     set_session(session)
     job.status = "done"; update_job(job)
 
-# ═══════════════════════ دانلود همه فایل‌های پیدا شده ═══════════════════════
-def handle_download_all_found(job):
-    chat_id = job.chat_id
-    session = get_session(chat_id)
-    all_results = session.found_downloads or []
-    if not all_results:
-        send_message(chat_id, "🚫 فایلی برای دانلود وجود ندارد.")
-        job.status = "done"; update_job(job)
-        return
-
-    job_dir = os.path.join("jobs_data", job.job_id)
-    os.makedirs(job_dir, exist_ok=True)
-    send_message(chat_id, f"📦 در حال دانلود {len(all_results)} فایل...")
-
-    downloaded_files = []
-    for i, f in enumerate(all_results):
-        try:
-            fname = get_filename_from_url(f['url'])
-            fpath = os.path.join(job_dir, fname)
-            counter = 1
-            while os.path.exists(fpath):
-                base, ext = os.path.splitext(fname)
-                fpath = os.path.join(job_dir, f"{base}_{counter}{ext}")
-                counter += 1
-            with requests.get(f['url'], stream=True, timeout=60, headers={"User-Agent":"Mozilla/5.0"}) as r:
-                r.raise_for_status()
-                with open(fpath, "wb") as fh:
-                    for chunk in r.iter_content(8192): fh.write(chunk)
-            downloaded_files.append(fpath)
-        except Exception as e:
-            safe_print(f"download_all: failed {f['url']}: {e}")
-
-    if not downloaded_files:
-        send_message(chat_id, "❌ هیچ فایلی دانلود نشد.")
-        job.status = "error"; update_job(job)
-        shutil.rmtree(job_dir, ignore_errors=True)
-        return
-
-    zp = os.path.join(job_dir, "all_files.zip")
-    with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
-        for fp in downloaded_files:
-            zf.write(fp, os.path.basename(fp))
-
-    parts = split_file_binary(zp, "all_files", ".zip") if os.path.getsize(zp) > ZIP_PART_SIZE else [zp]
-    instr = os.path.join(job_dir, "merge.txt")
-    with open(instr, "w") as f:
-        f.write("همه‌ی فایل‌ها را دانلود کنید، سپس فایل .001 را با WinRAR یا 7-Zip باز کنید.")
-    send_document(chat_id, instr, caption="📝 راهنما")
-    for idx, p in enumerate(parts, 1):
-        send_document(chat_id, p, caption=f"📦 پارت {idx}/{len(parts)}")
-    job.status = "done"; update_job(job)
-    shutil.rmtree(job_dir, ignore_errors=True)
-
-# ═══════════════════════ پنل ادمین (با دکمه خاموش/روشن) ═══════════════════════
+# ═══════════════════════ پنل ادمین ═══════════════════════
 def admin_panel(chat_id):
     try:
         mem = subprocess.run(['free', '-m'], stdout=subprocess.PIPE, text=True).stdout.strip()
         disk = subprocess.run(['df', '-h'], stdout=subprocess.PIPE, text=True).stdout.strip()
         uptime = subprocess.run(['uptime'], stdout=subprocess.PIPE, text=True).stdout.strip()
-        sessions = load_sessions()
-        active_users = len(sessions)
-
+        sessions = load_sessions(); active_users = len(sessions)
         service_status = "⛔ غیرفعال" if is_service_disabled() else "✅ فعال"
         msg = (f"🛠️ **پنل ادمین**\n\n"
                f"🔧 **وضعیت سرویس:** {service_status}\n\n"
@@ -1686,14 +1743,12 @@ def admin_panel(chat_id):
                f"📀 **دیسک:**\n{disk}\n\n"
                f"⏱️ **آپ‌تایم:**\n{uptime}\n\n"
                f"👥 **کاربران فعال:** {active_users}")
-
         kb = {"inline_keyboard": [
             [{"text": "🔄 تغییر وضعیت سرویس", "callback_data": "admin_toggleservice"}],
             [{"text": "🔙 بازگشت", "callback_data": "back_main"}]
         ]}
         send_message(chat_id, msg, reply_markup=kb)
-    except Exception as e:
-        send_message(chat_id, f"❌ خطا در دریافت اطلاعات: {e}")
+    except Exception as e: send_message(chat_id, f"❌ خطا در دریافت اطلاعات: {e}")
 # ═══════════════════════ مدیریت پیام و Callback ═══════════════════════
 def handle_message(chat_id, text):
     session = get_session(chat_id)
@@ -1722,7 +1777,6 @@ def handle_message(chat_id, text):
 
     # 🛑 بررسی خاموشی نرم (Soft Shutdown)
     if is_service_disabled() and not session.is_admin:
-        # فقط دستورات شروع و کد اشتراک مجاز هستند
         if text == "/start":
             session.state = "idle"; session.click_counter = 0; set_session(session)
             send_message(chat_id, "⛔ سرویس در حال حاضر غیرفعال است. لطفاً بعداً تلاش کنید.",
@@ -1741,7 +1795,6 @@ def handle_message(chat_id, text):
             else:
                 send_message(chat_id, "⛔ کد نامعتبر یا سرویس غیرفعال است.")
             return
-        # سایر پیام‌ها
         if session.is_pro or session.is_admin:
             send_message(chat_id, "⛔ سرویس موقتاً غیرفعال است. لطفاً بعداً تلاش کنید.",
                          reply_markup=main_menu_keyboard(session.is_admin, session.subscription))
@@ -1852,11 +1905,9 @@ def handle_message(chat_id, text):
             need_scroll = parts.endswith("_S")
             if need_scroll:
                 parts = parts[:-2]
-            # اگر با http شروع بشه، لینک مستقیم
             if parts.startswith("http://") or parts.startswith("https://"):
                 url = parts
             else:
-                # جستجو در text_links
                 url = None
                 if session.text_links and parts in session.text_links:
                     url = session.text_links[parts]
@@ -1876,16 +1927,16 @@ def handle_message(chat_id, text):
     if session.state == "waiting_record_time":
         try:
             val = int(text)
-            if 1 <= val <= 30:
+            if 1 <= val <= 1800:  # ★ تا ۳۰ دقیقه
                 session.settings.record_time = val
                 session.state = "idle"
                 set_session(session)
                 send_message(chat_id, f"⏱️ زمان ضبط روی {val} ثانیه تنظیم شد.",
                              reply_markup=settings_keyboard(session.settings))
             else:
-                send_message(chat_id, "❌ لطفاً عددی بین ۱ تا ۳۰ وارد کنید.")
+                send_message(chat_id, "❌ لطفاً عددی بین ۱ تا ۱۸۰۰ وارد کنید.")
         except:
-            send_message(chat_id, "❌ لطفاً یک عدد معتبر بین ۱ تا ۳۰ وارد کنید.")
+            send_message(chat_id, "❌ لطفاً یک عدد معتبر بین ۱ تا ۱۸۰۰ وارد کنید.")
         return
 
     # حالت‌های انتظار URL
@@ -1917,7 +1968,6 @@ def handle_live_command(chat_id, text, url, need_scroll=False):
     session = get_session(chat_id)
     rec_time = session.settings.record_time
 
-    # اگر url یک لینک کامل باشه، مستقیم برو به اون صفحه
     if url.startswith("http://") or url.startswith("https://"):
         job_id = str(uuid.uuid4())
         job = Job(job_id=job_id, chat_id=chat_id, mode="record_video", url=url)
@@ -1926,7 +1976,6 @@ def handle_live_command(chat_id, text, url, need_scroll=False):
         send_message(chat_id, f"🎬 ضبط Live آغاز شد ({rec_time} ثانیه) – رفتن به آدرس داده‌شده...")
         return
 
-    # در غیر این صورت، url یک دکمه در صفحه فعلی
     if not session.browser_url:
         send_message(chat_id, "❌ مرورگری برای اجرای Live باز نیست.")
         return
@@ -1937,7 +1986,6 @@ def handle_live_command(chat_id, text, url, need_scroll=False):
         page.goto(session.browser_url, timeout=60000, wait_until="domcontentloaded")
         page.wait_for_timeout(2000)
 
-        # کلیک روی دکمه با href برابر url
         page.evaluate(f"""() => {{
             const links = document.querySelectorAll('a[href]');
             for (const a of links) {{
@@ -1952,7 +2000,6 @@ def handle_live_command(chat_id, text, url, need_scroll=False):
         if need_scroll:
             smooth_scroll_to_video(page)
 
-        # ایجاد Job ضبط
         job_id = str(uuid.uuid4())
         job = Job(job_id=job_id, chat_id=chat_id, mode="record_video", url=page.url)
         enqueue(job)
@@ -1968,12 +2015,11 @@ def handle_callback(cq):
     chat_id = msg["chat"]["id"]
     session = get_session(chat_id)
 
-    # 🛑 بررسی خاموشی نرم (Soft Shutdown) – فقط پنل ادمین و لغو مجازند
+    # 🛑 بررسی خاموشی نرم (Soft Shutdown)
     if is_service_disabled() and not session.is_admin:
         if data not in ("menu_cancel", "back_main"):
             answer_callback_query(cid, "⛔ سرویس موقتاً غیرفعال است.")
             return
-        # اجازه لغو و بازگشت داده می‌شود
         if data == "menu_cancel":
             session.state = "idle"; session.cancel_requested = True; session.current_job_id = None
             session.click_counter = 0; set_session(session)
@@ -2022,13 +2068,17 @@ def handle_callback(cq):
     # تنظیمات
     elif data == "set_rec":
         session.state = "waiting_record_time"; set_session(session)
-        send_message(chat_id, "⏱️ زمان ضبط را به ثانیه وارد کنید (۱ تا ۳۰):")
+        send_message(chat_id, "⏱️ زمان ضبط را به ثانیه وارد کنید (۱ تا ۱۸۰۰):")
     elif data == "set_dlmode":
         session.settings.default_download_mode = "stream" if session.settings.default_download_mode == "store" else "store"
         set_session(session)
         send_message(chat_id, "تنظیمات:", reply_markup=settings_keyboard(session.settings))
     elif data == "set_brwmode":
-        session.settings.browser_mode = "media" if session.settings.browser_mode == "text" else "text"
+        # چرخش بین سه حالت: text → media → explorer → text
+        modes = ["text", "media", "explorer"]
+        current = session.settings.browser_mode
+        idx = modes.index(current)
+        session.settings.browser_mode = modes[(idx + 1) % 3]
         set_session(session)
         send_message(chat_id, "تنظیمات:", reply_markup=settings_keyboard(session.settings))
     elif data == "set_deep":
@@ -2100,6 +2150,12 @@ def handle_callback(cq):
         enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="scan_downloads", url=""))
     elif data.startswith("extcmd_"):
         enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="extract_commands", url=""))
+
+    # ★ تحلیل هوشمند و تحلیل سورس (Explorer)
+    elif data.startswith("sman_"):
+        enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="smart_analyze", url=""))
+    elif data.startswith("srcan_"):
+        enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="source_analyze", url=""))
 
     # ضبط ویدیو – اگر حالت live باشد، prompt می‌دهیم
     elif data.startswith("recvid_"):
@@ -2196,7 +2252,7 @@ def main():
     for i in range(WORKER_COUNT):
         threading.Thread(target=worker_loop, args=(i, stop_event), daemon=True).start()
     threading.Thread(target=polling_loop, args=(stop_event,), daemon=True).start()
-    safe_print("✅ Bot17 Enterprise اجرا شد")
+    safe_print("✅ Bot18 Ultimate Explorer اجرا شد")
     try:
         while True: time.sleep(1)
     except KeyboardInterrupt: stop_event.set()
