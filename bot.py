@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ربات بله – نسخهٔ ۹ (Final)
-مرورگر دو حالته، دانلودر هوشمند، اسکرین‌شات 4K، ضبط ویدیو، دانلود سایت، تنظیمات.
-رفع تمام باگ‌های گذشته.
+ربات بله – نسخهٔ ۱۰ (Final)
+مرورگر دو حالته با stealth، دانلودر هوشمند، اسکرین‌شات 4K، ضبط ویدیو، دانلود سایت،
+تنظیمات، و کلی بهبودهای جانبی.
 """
 
 import os, sys, json, time, math, queue, shutil, zipfile, uuid, re, hashlib
-import subprocess, threading, traceback
+import subprocess, threading, traceback, random
 from dataclasses import dataclass, asdict, field
 from typing import Dict, Any, Optional, List, Tuple
 from urllib.parse import urlparse, urljoin, unquote
@@ -17,7 +17,7 @@ from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 # ═══════════════════════
-# تنظیمات اصلی
+# تنظیمات
 # ═══════════════════════
 BALE_BOT_TOKEN = os.getenv("BALE_BOT_TOKEN", "").strip()
 if not BALE_BOT_TOKEN:
@@ -28,7 +28,7 @@ BALE_API_URL = "https://tapi.bale.ai/bot" + BALE_BOT_TOKEN
 REQUEST_TIMEOUT = 30
 LONG_POLL_TIMEOUT = 50
 WORKER_COUNT = 1
-ZIP_PART_SIZE = int(19.5 * 1024 * 1024)
+ZIP_PART_SIZE = int(19 * 1024 * 1024)  # دقیقاً ۱۹ مگابایت
 
 PRO_CODES = ["PRO2024A", "PRO2024B", "PRO2024C", "PRO2024D", "PRO2024E"]
 
@@ -62,7 +62,7 @@ class SessionState:
     browser_url: Optional[str] = None
     last_interaction: float = time.time()
     cancel_requested: bool = False
-    text_links: Optional[Dict[str, str]] = None   # command -> url مستقیم
+    text_links: Optional[Dict[str, str]] = None
     browser_links: Optional[List[Dict[str, str]]] = None
     browser_page: int = 0
     settings: UserSettings = field(default_factory=UserSettings)
@@ -181,11 +181,19 @@ def settings_keyboard(settings: UserSettings):
     ]}
 
 # ═══════════════════════
-# Playwright – سراسری
+# Playwright – سراسری (با stealth)
 # ═══════════════════════
 _global_playwright = None
 _global_browser = None
 browser_contexts = {}
+
+# تلاش برای import playwright_stealth (اگر نصب نباشد، بدون آن ادامه می‌دهیم)
+try:
+    from playwright_stealth import Stealth
+    HAS_STEALTH = True
+except ImportError:
+    HAS_STEALTH = False
+    safe_print("⚠️ playwright_stealth نصب نیست؛ stealth غیرفعال.")
 
 def get_or_create_context(chat_id):
     global _global_playwright, _global_browser
@@ -202,14 +210,30 @@ def get_or_create_context(chat_id):
             _global_playwright = sync_playwright().start()
             _global_browser = _global_playwright.chromium.launch(
                 headless=True,
-                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
-                      "--disable-gpu", "--disable-blink-features=AutomationControlled"]
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-features=IsolateOrigins,site-per-process",
+                    "--disable-web-security",
+                    "--disable-features=BlockInsecurePrivateNetworkRequests",
+                ]
             )
-        context = _global_browser.new_context(
-            viewport={"width": 412, "height": 915},
-            user_agent="Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/120.0.0.0 Mobile Safari/537.36"
-        )
+        # viewport تصادفی برای natural‌تر شدن
+        vw = random.choice([412, 390, 414, 428, 360])
+        vh = random.choice([915, 844, 896, 926, 780])
+        context = _global_browser.new_context(viewport={"width": vw, "height": vh})
+        if HAS_STEALTH:
+            # اعمال stealth روی context (با یک صفحه موقت)
+            page = context.new_page()
+            try:
+                Stealth().apply_stealth(page)
+            except Exception as e:
+                safe_print(f"stealth apply error: {e}")
+            finally:
+                page.close()
         browser_contexts[ctx_key] = {"context": context, "last_used": time.time()}
         return context
 
@@ -253,7 +277,6 @@ def extract_clickable_and_media(page, mode="text"):
             });
             return [...new Set(vids)].filter(u => u.startsWith('http'));
         }""")
-        # لینک‌های معمولی هم برای پیمایش
         anchors = page.evaluate("""() => {
             const a = []; document.querySelectorAll('a[href]').forEach(e => a.push(e.href));
             return a.filter(h => h.startsWith('http'));
@@ -582,10 +605,11 @@ def process_job(worker_id, job):
                 send_message(chat_id, "🔄 آماده.", reply_markup=main_menu_keyboard())
 
 # ═══════════════════════
-# دانلود هوشمند + همزمان
+# دانلود هوشمند (اصلاحی بر اساس تنظیمات)
 # ═══════════════════════
 def handle_download(job, job_dir):
     chat_id = job.chat_id
+    session = get_session(chat_id)
     url = job.url
     if is_direct_file_url(url):
         direct_link = url
@@ -604,17 +628,17 @@ def handle_download(job, job_dir):
         head = requests.head(direct_link, timeout=10, allow_redirects=True)
         size = head.headers.get("Content-Length")
         size_str = f"{int(size)/1024/1024:.2f} MB" if size else "نامشخص"
-        ftype = head.headers.get("Content-Type", "unknown")
     except:
-        size_str = "نامشخص"; ftype = "unknown"
+        size_str = "نامشخص"
     fname = get_filename_from_url(direct_link)
 
+    # مستقیماً ZIP یا اصلی را بپرس (بدون منوی روش)
     kb = {"inline_keyboard": [
-        [{"text": "⚡ سریع", "callback_data": f"stream_{job.job_id}"},
-         {"text": "💾 عادی", "callback_data": f"store_{job.job_id}"}],
+        [{"text": "📦 ZIP", "callback_data": f"dlzip_{job.job_id}"},
+         {"text": "📄 اصلی", "callback_data": f"dlraw_{job.job_id}"}],
         [{"text": "❌ لغو", "callback_data": f"canceljob_{job.job_id}"}]
     ]}
-    send_message(chat_id, f"📄 {fname} ({size_str})\nروش:", reply_markup=kb)
+    send_message(chat_id, f"📄 {fname} ({size_str})", reply_markup=kb)
     job.status = "awaiting_user"
     job.extra = {"direct_link": direct_link, "filename": fname}
     update_job(job)
@@ -646,12 +670,22 @@ def download_and_stream(url, fname, job_dir, chat_id):
 def execute_download(job, job_dir):
     chat_id = job.chat_id
     extra = job.extra
-    if extra.get("stream_mode"):
+    session = get_session(chat_id)
+    mode = session.settings.default_download_mode  # "stream" یا "store"
+    pack_zip = extra.get("pack_zip", False)
+
+    # اگر stream فعال است ولی ZIP خواسته، نمی‌توانیم همزمان ZIP کنیم
+    if mode == "stream" and pack_zip:
+        send_message(chat_id, "📦 ZIP با حالت سریع ممکن نیست؛ دانلود عادی انجام می‌شود.")
+        mode = "store"
+
+    if mode == "stream":
         send_message(chat_id, "⚡ دانلود همزمان...")
         download_and_stream(extra["direct_link"], extra["filename"], job_dir, chat_id)
         job.status = "done"; update_job(job)
         return
 
+    # حالت store
     fname = extra["filename"]
     if "file_path" in extra:
         fpath = extra["file_path"]
@@ -663,8 +697,7 @@ def execute_download(job, job_dir):
             with open(fpath, "wb") as f:
                 for c in r.iter_content(8192): f.write(c)
 
-    is_zip = extra.get("pack_zip", False)
-    if is_zip:
+    if pack_zip:
         parts = create_zip_and_split(fpath, fname); label = "ZIP"
     else:
         base, ext = os.path.splitext(fname)
@@ -672,7 +705,7 @@ def execute_download(job, job_dir):
 
     instr = os.path.join(job_dir, "merge.txt")
     with open(instr, "w") as f:
-        if is_zip:
+        if pack_zip:
             f.write("همه‌ی فایل‌ها را دانلود کنید، سپس فایل .001 را با WinRAR یا 7-Zip باز کنید.")
         else:
             f.write(f"برای ادغام در ویندوز: copy /b {'+'.join([os.path.basename(p) for p in parts])} {fname}")
@@ -716,7 +749,7 @@ def handle_blind_download(job):
         shutil.rmtree(job_dir, ignore_errors=True)
 
 # ═══════════════════════
-# یوتیوب
+# یوتیوب (با yt-dlp)
 # ═══════════════════════
 def handle_youtube_download(job):
     chat_id = job.chat_id
@@ -751,7 +784,7 @@ def handle_youtube_download(job):
         shutil.rmtree(job_dir, ignore_errors=True)
 
 # ═══════════════════════
-# ضبط ویدیو (مقاوم در برابر timeout)
+# ضبط ویدیو (مقاوم و با stealth بهتر)
 # ═══════════════════════
 def handle_record_video(job):
     chat_id = job.chat_id
@@ -774,19 +807,24 @@ def handle_record_video(job):
             page.goto(url, timeout=60000, wait_until="domcontentloaded")
             page.wait_for_timeout(2000)
             if auto_play:
+                # فقط video.play() و کلیک روی دکمه‌های بزرگ پخش ویدیو (با دقت بیشتر)
                 try:
                     page.evaluate("() => { const v = document.querySelector('video'); if (v) v.play(); }")
                 except: pass
                 try:
-                    page.click('.play-button, [aria-label="Play"], .ytp-large-play-button, .vjs-big-play-button',
-                               timeout=3000)
+                    # تلاش برای کلیک روی دکمه‌های استاندارد HTML5 video
+                    page.click('button[aria-label="Play"], .vjs-big-play-button, .ytp-large-play-button', timeout=3000)
+                except: pass
+                time.sleep(1)
+                try:  # دوباره play
+                    page.evaluate("() => { const v = document.querySelector('video'); if (v) v.play(); }")
                 except: pass
             page.wait_for_timeout(rec_time * 1000)
         finally:
             page.close()
             context.close()
 
-        time.sleep(1)  # wait for video to be written
+        time.sleep(1)
         webm = None
         for f in os.listdir(job_dir):
             if f.endswith('.webm'):
@@ -821,7 +859,7 @@ def handle_record_video(job):
         shutil.rmtree(job_dir, ignore_errors=True)
 
 # ═══════════════════════
-# مرورگر (صفحه‌بندی، دوستونه، حالت مدیا)
+# مرورگر (با بهبود stealth و فیلتر تبلیغات)
 # ═══════════════════════
 def handle_browser(job, job_dir):
     chat_id = job.chat_id
@@ -836,11 +874,15 @@ def handle_browser(job, job_dir):
         page.screenshot(path=spath, full_page=True)
         links, video_urls = extract_clickable_and_media(page, mode)
 
+        # فیلتر تبلیغات از video_urls
+        ad_keywords = ["ad", "doubleclick", "banner", "popup", "tracker", "analytics"]
+        clean_video_urls = [v for v in video_urls if not any(k in v for k in ad_keywords)]
+
         all_links = []
         for typ, text, href in links:
             all_links.append({"type": typ, "text": text[:25], "href": href})
         if mode == "media":
-            for vurl in video_urls:
+            for vurl in clean_video_urls:
                 all_links.append({"type": "video", "text": "🎬 ویدیو", "href": vurl})
 
         session.state = "browsing"
@@ -895,14 +937,13 @@ def send_browser_page(chat_id, image_path=None, url="", page_num=0):
         send_message(chat_id, f"🌐 {url} (صفحه {page_num+1})")
     send_message(chat_id, f"صفحه {page_num+1}/{math.ceil(len(all_links)/per_page)}", reply_markup=kb)
 
-    # لینک‌های اضافی → دستور متنی
     extra = all_links[end:]
     if extra:
         cmds = {}
         lines = ["🔹 لینک‌های بیشتر:"]
         for i, link in enumerate(extra):
             cmd = f"/a{hashlib.md5(link['href'].encode()).hexdigest()[:5]}"
-            cmds[cmd] = link['href']          # مستقیماً URL
+            cmds[cmd] = link['href']
             lines.append(f"{cmd} : {link['text']}")
         send_message(chat_id, "\n".join(lines))
         session.text_links = cmds
@@ -929,7 +970,7 @@ def settings_callback(data, chat_id, session):
         send_message(chat_id, "منوی اصلی:", reply_markup=main_menu_keyboard())
 
 # ═══════════════════════
-# مدیریت پیام و Callback (اصلاح‌شده)
+# مدیریت پیام و Callback
 # ═══════════════════════
 def handle_message(chat_id, text):
     session = get_session(chat_id)
@@ -1016,19 +1057,6 @@ def handle_callback(cq):
         job = find_job(jid)
         if job and job.status == "done":
             enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="4k_screenshot", url=job.url))
-    elif data.startswith("stream_") or data.startswith("store_"):
-        jid = data[7:]
-        job = find_job(jid)
-        if job and job.extra:
-            stream = data.startswith("stream_")
-            kb = {"inline_keyboard": [
-                [{"text":"📦 ZIP","callback_data":f"dlzip_{job.job_id}"},
-                 {"text":"📄 اصلی","callback_data":f"dlraw_{job.job_id}"}],
-                [{"text":"❌ لغو","callback_data":f"canceljob_{job.job_id}"}]
-            ]}
-            send_message(chat_id, "فشرده‌سازی:", reply_markup=kb)
-            job.extra["stream_mode"] = stream
-            update_job(job)
     elif data.startswith("dlzip_") or data.startswith("dlraw_"):
         jid = data[6:] if data.startswith("dlzip_") else data[6:]
         job = find_job(jid)
@@ -1113,7 +1141,7 @@ def main():
     for i in range(WORKER_COUNT):
         threading.Thread(target=worker_loop, args=(i, stop_event), daemon=True).start()
     threading.Thread(target=polling_loop, args=(stop_event,), daemon=True).start()
-    safe_print("✅ Bot9 Final اجرا شد")
+    safe_print("✅ Bot10 اجرا شد")
     try:
         while True: time.sleep(1)
     except KeyboardInterrupt:
