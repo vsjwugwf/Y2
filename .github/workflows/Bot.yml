@@ -1,4 +1,4 @@
-name: Bale Bot v11 Ultimate
+name: Bale Bot v14
 
 on:
   workflow_dispatch:
@@ -9,27 +9,19 @@ jobs:
   run-bot:
     runs-on: ubuntu-latest
     timeout-minutes: 355
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Install Python dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install requests playwright beautifulsoup4 yt-dlp playwright-stealth
-
-      - name: Install Playwright Chromium
-        run: |
+          pip install --upgrade pip
+          pip install requests playwright beautifulsoup4 playwright-stealth
           python -m playwright install chromium
-
       - name: Run bot
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
-        run: |
-          python bot.py
+        run: python bot.py
