@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ربات بله – نسخهٔ ۱۲ (Final Prime)
-مرورگر دو حالته با stealth، اسکن ویدیوی فوق‌هوشمند، دانلودر هوشمند،
-اسکرین‌شات 4K، ضبط ویدیو، دانلود سایت، تنظیمات.
-رفع کامل مشکلات استخراج ویدیو (HLS/m3u8)، تبلیغات، و خطاهای قبلی
+ربات بله – نسخهٔ ۱۳ (Final Fix)
+مرورگر دو حالته، اسکن ویدیوی فوق‌هوشمند، دانلودر، اسکرین‌شات 4K،
+ضبط ویدیو با تزریق خودکار پخش، مسدودسازی تبلیغات و پاپ‌آپ.
 """
 
 import os, sys, json, time, math, queue, shutil, zipfile, uuid, re, hashlib
@@ -27,7 +26,7 @@ BALE_API_URL = "https://tapi.bale.ai/bot" + BALE_BOT_TOKEN
 REQUEST_TIMEOUT = 30
 LONG_POLL_TIMEOUT = 50
 WORKER_COUNT = 1
-ZIP_PART_SIZE = int(19 * 1024 * 1024)  # 19 MB
+ZIP_PART_SIZE = int(19 * 1024 * 1024)
 
 PRO_CODES = ["PRO2024A", "PRO2024B", "PRO2024C", "PRO2024D", "PRO2024E"]
 
@@ -171,7 +170,7 @@ def settings_keyboard(settings: UserSettings):
         [{"text": "🔙 بازگشت", "callback_data": "back_main"}]
     ]}
 
-# ═══════════════════════ Playwright – global ═══════════════════════
+# ═══════════════════════ Playwright – global (ضد تبلیغ) ═══════════════════════
 _global_playwright = None
 _global_browser = None
 browser_contexts = {}
@@ -181,7 +180,6 @@ try:
     HAS_STEALTH = True
 except ImportError:
     HAS_STEALTH = False
-    safe_print("⚠️ playwright_stealth نصب نیست")
 
 AD_DOMAINS = [
     "doubleclick.net", "googleadsyndication.com", "adservice.google.com",
@@ -194,6 +192,11 @@ AD_DOMAINS = [
     "eroadvertising.com", "juicyads.com", "plugrush.com",
     "txxx.com", "fuckbook.com", "traffic-force.com", "bongacams.com",
     "trafficjunky.net", "adtng.com"
+]
+
+BLOCKED_AD_KEYWORDS = [
+    "ads", "advert", "popunder", "banner", "doubleclick", "taboola",
+    "outbrain", "popcash", "traffic", "monetize", "adx", "adserving"
 ]
 
 def get_or_create_context(chat_id):
@@ -211,12 +214,22 @@ def get_or_create_context(chat_id):
             _global_playwright = sync_playwright().start()
             _global_browser = _global_playwright.chromium.launch(
                 headless=True,
-                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
-                      "--disable-gpu", "--disable-blink-features=AutomationControlled"]
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-blink-features=AutomationControlled",
+                    "--autoplay-policy=no-user-gesture-required",  # ★
+                    "--disable-web-security",
+                    "--mute-audio"
+                ]
             )
         vw = random.choice([412, 390, 414])
         vh = random.choice([915, 844, 896])
         context = _global_browser.new_context(viewport={"width": vw, "height": vh})
+        # بستن خودکار پاپ‌آپ‌ها
+        context.on("page", lambda page: page.close())
         if HAS_STEALTH:
             page = context.new_page()
             try: Stealth().apply_stealth(page)
@@ -233,9 +246,8 @@ def close_user_context(chat_id):
         try: ctx["context"].close()
         except: pass
 
-# ═══════════════════════ استخراج هوشمند ویدیوهای پنهان ═══════════════════════
+# ═══════════════════════ استخراج هوشمند ویدیوها ═══════════════════════
 def extract_clickable_and_media(page, mode="text"):
-    """فقط لینک‌های معمولی و ویدیوهای قابل مشاهده"""
     if mode == "text":
         raw = page.evaluate("""() => {
             const items = []; const seen = new Set();
@@ -272,11 +284,7 @@ def extract_clickable_and_media(page, mode="text"):
         return links, video_sources
 
 def scan_videos_smart(page):
-    """
-    اسکنر همه‌کاره: تگ‌های video/iframe + شنود شبکه + استخراج از JSON جاگذاری‌شده.
-    خروجی: لیست { text, href, score }
-    """
-    # 1. جمع‌آوری المان‌های قابل مشاهده
+    # 1. عناصر visible
     elements = page.evaluate("""() => {
         const results = [];
         const centerX = window.innerWidth / 2;
@@ -302,7 +310,7 @@ def scan_videos_smart(page):
         return results;
     }""")
 
-    # 2. شنود شبکه برای m3u8/mpd
+    # 2. شبکه (HLS/DASH)
     network_urls = []
     def capture(response):
         ct = response.headers.get("content-type", "")
@@ -313,34 +321,30 @@ def scan_videos_smart(page):
     page.wait_for_timeout(3000)
     page.remove_listener("response", capture)
 
-    # 3. استخراج از JSON درون اسکریپت‌ها
+    # 3. JSON اسکریپت‌ها
     json_urls = page.evaluate("""() => {
         const results = [];
         const scripts = document.querySelectorAll('script');
         for (const s of scripts) {
             const text = s.textContent || '';
-            // جستجوی الگوهای رایج
             const matches = text.match(/(https?:\\/\\/[^"']+\\.(?:m3u8|mp4|mkv|webm|mpd)[^"']*)/gi);
             if (matches) results.push(...matches);
         }
         return results;
     }""")
 
-    # ادغام و فیلتر تبلیغات
     all_candidates = []
-    # از عناصر
     for el in elements:
         href = el["href"]
         if not href.startswith("http"): continue
         parsed = urlparse(href)
         if any(ad in parsed.netloc for ad in AD_DOMAINS): continue
-        if any(kw in href.lower() for kw in ["/ad/", "/ads/", "/banner/", "/popup/", "/track/", "/pixel/"]): continue
+        if any(kw in href.lower() for kw in BLOCKED_AD_KEYWORDS): continue
         all_candidates.append({
             "text": (el["text"] + f" ({parsed.netloc})")[:35],
             "href": href,
             "score": el["score"]
         })
-    # از شبکه
     for url in network_urls:
         if url in [c["href"] for c in all_candidates]: continue
         parsed = urlparse(url)
@@ -348,9 +352,8 @@ def scan_videos_smart(page):
         all_candidates.append({
             "text": f"HLS/DASH ({parsed.netloc})"[:35],
             "href": url,
-            "score": 100000  # اولویت بالا
+            "score": 100000
         })
-    # از JSON
     for url in json_urls:
         if url in [c["href"] for c in all_candidates]: continue
         parsed = urlparse(url)
@@ -360,8 +363,6 @@ def scan_videos_smart(page):
             "href": url,
             "score": 90000
         })
-
-    # مرتب‌سازی بر اساس score نزولی
     all_candidates.sort(key=lambda x: x["score"], reverse=True)
     return all_candidates
 
@@ -449,6 +450,8 @@ def create_zip_and_split(src, base):
 def screenshot_full(context, url, out):
     page = context.new_page()
     try:
+        # اعمال فیلتر تبلیغات روی این صفحه
+        page.route("**/*", ad_blocker)
         page.goto(url, timeout=90000, wait_until="domcontentloaded")
         page.wait_for_timeout(2000)
         page.screenshot(path=out, full_page=True)
@@ -457,13 +460,21 @@ def screenshot_full(context, url, out):
 def screenshot_4k(context, url, out):
     page = context.new_page()
     try:
+        page.route("**/*", ad_blocker)
         page.set_viewport_size({"width": 3840, "height": 2160})
         page.goto(url, timeout=90000, wait_until="domcontentloaded")
         page.wait_for_timeout(3000)
         page.screenshot(path=out, full_page=True)
     finally: page.close()
 
-# ═══════════════════════ دانلود کامل سایت (wget + fallback) ═══════════════════════
+def ad_blocker(route):
+    url = route.request.url.lower()
+    if any(ad in url for ad in AD_DOMAINS) or any(kw in url for kw in BLOCKED_AD_KEYWORDS):
+        route.abort()
+    else:
+        route.continue_()
+
+# ═══════════════════════ دانلود کامل سایت ═══════════════════════
 def download_full_website(job):
     chat_id = job.chat_id
     url = job.url
@@ -481,11 +492,11 @@ def download_full_website(job):
                 _finish_website_download(job, job_dir)
                 return
         except: pass
-    # Fallback Playwright
     send_message(chat_id, "🔄 دانلود با مرورگر مخفی...")
     try:
         ctx = get_or_create_context(chat_id)
         page = ctx.new_page()
+        page.route("**/*", ad_blocker)
         page.goto(url, timeout=60000, wait_until="domcontentloaded")
         page.wait_for_timeout(3000)
         html = page.content()
@@ -818,7 +829,7 @@ def handle_blind_download(job):
         job.status = "error"; update_job(job)
         shutil.rmtree(job_dir, ignore_errors=True)
 
-# ═══════════════════════ ضبط ویدیو (اصلاح‌شده) ═══════════════════════
+# ═══════════════════════ ضبط ویدیو (با تزریق پخش) ═══════════════════════
 def handle_record_video(job):
     chat_id = job.chat_id
     session = get_session(chat_id)
@@ -835,15 +846,20 @@ def handle_record_video(job):
             record_video_size={"width": 1280, "height": 720}
         )
         page = context.new_page()
+        page.route("**/*", ad_blocker)  # فیلتر تبلیغات
         try:
             page.goto(url, timeout=60000, wait_until="domcontentloaded")
             page.wait_for_timeout(2000)
             if auto_play:
+                # 1. تلاش JS برای play()
                 try: page.evaluate("() => { const v = document.querySelector('video'); if (v) v.play(); }")
                 except: pass
-                try: page.click('button[aria-label="Play"], .vjs-big-play-button', timeout=3000)
+                # 2. کلیک روی دکمه‌های رایج (با دقت بیشتر)
+                try:
+                    page.click('.vjs-big-play-button, .plyr__control--overlaid, button[aria-label="Play"], .ytp-large-play-button, [class*="play"]', timeout=3000)
                 except: pass
                 time.sleep(1)
+                # 3. دوباره JS برای اطمینان
                 try: page.evaluate("() => { const v = document.querySelector('video'); if (v) v.play(); }")
                 except: pass
             page.wait_for_timeout(rec_time * 1000)
@@ -883,6 +899,7 @@ def handle_browser(job, job_dir):
     mode = session.settings.browser_mode
     ctx = get_or_create_context(chat_id)
     page = ctx.new_page()
+    page.route("**/*", ad_blocker)
     try:
         page.goto(job.url, timeout=60000, wait_until="domcontentloaded")
         page.wait_for_timeout(2000)
@@ -960,9 +977,10 @@ def handle_scan_videos(job):
     session = get_session(chat_id)
     ctx = get_or_create_context(chat_id)
     page = ctx.new_page()
+    page.route("**/*", ad_blocker)
     try:
         page.goto(session.browser_url, timeout=60000, wait_until="domcontentloaded")
-        page.wait_for_timeout(3000)  # صبر برای لود پخش‌کننده
+        page.wait_for_timeout(3000)
         videos = scan_videos_smart(page)
         if not videos:
             send_message(chat_id, "🚫 هیچ ویدیویی یافت نشد.")
@@ -1123,7 +1141,7 @@ def main():
     for i in range(WORKER_COUNT):
         threading.Thread(target=worker_loop, args=(i, stop_event), daemon=True).start()
     threading.Thread(target=polling_loop, args=(stop_event,), daemon=True).start()
-    safe_print("✅ Bot12 Prime اجرا شد")
+    safe_print("✅ Bot13 اجرا شد")
     try:
         while True: time.sleep(1)
     except KeyboardInterrupt: stop_event.set()
