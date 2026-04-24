@@ -1,4 +1,4 @@
-name: Bale Bot Pro Runner
+name: Bale Bot Pro Runner v9
 
 on:
   workflow_dispatch:
@@ -9,6 +9,9 @@ jobs:
   run-bot:
     runs-on: ubuntu-latest
     timeout-minutes: 355
+
+    env:
+      ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true   # رفع هشدار Node 20
 
     steps:
       - name: Checkout repository
@@ -21,7 +24,7 @@ jobs:
 
       - name: Install system dependencies (ffmpeg & wget)
         run: |
-          sudo apt-get update
+          sudo apt-get update -y
           sudo apt-get install -y ffmpeg wget
 
       - name: Install Python dependencies
