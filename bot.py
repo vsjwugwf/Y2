@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 ربات بله – نسخهٔ ۱۴ (Ultimate Stable)
-مرورگر دو حالته با stealth، اسکن ویدیوی هوشمند، دانلودر، اسکرین‌شات 4K،
-ضبط ویدیو، دانلود سایت، تنظیمات، پنل ادمین، محدودیت کلیک.
+مرورگر دو حالته با stealth، اسکن ویدیو و فایل، دانلودر، اسکرین‌شات 4K،
+ضبط ویدیو با کلیک هوشمند، پنل ادمین، محدودیت کلیک و صف
 """
 
 import os, sys, json, time, math, queue, shutil, zipfile, uuid, re, hashlib
@@ -16,7 +16,7 @@ import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
-# ═══════════════════════ تنظیمات ═══════════════════════
+# ═══════════════════════ تنظیمات اصلی ═══════════════════════
 BALE_BOT_TOKEN = os.getenv("BALE_BOT_TOKEN", "").strip()
 if not BALE_BOT_TOKEN:
     print("ERROR: BALE_BOT_TOKEN not set", file=sys.stderr)
@@ -26,7 +26,7 @@ BALE_API_URL = "https://tapi.bale.ai/bot" + BALE_BOT_TOKEN
 REQUEST_TIMEOUT = 30
 LONG_POLL_TIMEOUT = 50
 WORKER_COUNT = 1
-ZIP_PART_SIZE = int(19 * 1024 * 1024)
+ZIP_PART_SIZE = int(19 * 1024 * 1024)      # 19 MB
 
 PRO_CODES = ["PRO2024A", "PRO2024B", "PRO2024C", "PRO2024D", "PRO2024E"]
 ADMIN_CHAT_ID = 46829437
@@ -46,25 +46,25 @@ def safe_print(*args, **kwargs):
 @dataclass
 class UserSettings:
     record_time: int = 20
-    auto_play_video: bool = True
     default_download_mode: str = "store"   # "store" یا "stream"
     browser_mode: str = "text"             # "text" یا "media"
 
 @dataclass
 class SessionState:
     chat_id: int
-    state: str = "idle"
+    state: str = "idle"                    # idle, waiting_url_*, browsing, waiting_record_time
     is_pro: bool = False
     is_admin: bool = False
     current_job_id: Optional[str] = None
     browser_url: Optional[str] = None
     last_interaction: float = time.time()
     cancel_requested: bool = False
-    text_links: Optional[Dict[str, str]] = None
+    text_links: Optional[Dict[str, str]] = None   # command -> url
     browser_links: Optional[List[Dict[str, str]]] = None
     browser_page: int = 0
     settings: UserSettings = field(default_factory=UserSettings)
-    click_counter: int = 0          # محدودیت کلیک (فقط غیر ادمین)
+    click_counter: int = 0
+    ad_blocked_domains: Optional[List[str]] = field(default_factory=list)
 
 @dataclass
 class Job:
@@ -103,14 +103,14 @@ def get_session(chat_id):
         for k, v in d.items():
             if k == "settings":
                 s.settings = UserSettings(**v)
+            elif k == "ad_blocked_domains":
+                s.ad_blocked_domains = v
             else:
                 setattr(s, k, v)
-        # تنظیم ادمین
         if s.chat_id == ADMIN_CHAT_ID:
             s.is_admin = True
             s.is_pro = True
         return s
-    # ایجاد session جدید
     s = SessionState(chat_id=chat_id)
     if s.chat_id == ADMIN_CHAT_ID:
         s.is_admin = True
@@ -120,6 +120,7 @@ def set_session(session):
     data = load_sessions()
     d = asdict(session)
     d["settings"] = asdict(session.settings)
+    d["ad_blocked_domains"] = session.ad_blocked_domains
     data[str(session.chat_id)] = d
     save_sessions(data)
 
@@ -164,7 +165,7 @@ def main_menu_keyboard(is_admin=False):
         [{"text": "📸 اسکرین‌شات", "callback_data": "menu_screenshot"}],
         [{"text": "📥 دانلود", "callback_data": "menu_download"}],
         [{"text": "⚙️ تنظیمات", "callback_data": "menu_settings"}],
-        [{"text": "❌ لغو / ریست", "callback_data": "menu_cancel"}]
+        [{"text": "💀 لغو / ریست", "callback_data": "menu_cancel"}]
     ]
     if is_admin:
         keyboard.append([{"text": "🛠️ پنل ادمین", "callback_data": "menu_admin"}])
@@ -172,14 +173,10 @@ def main_menu_keyboard(is_admin=False):
 
 def settings_keyboard(settings: UserSettings):
     rec = settings.record_time
-    play = "فعال ✅" if settings.auto_play_video else "غیرفعال ❌"
     dlm  = "سریع ⚡" if settings.default_download_mode == "stream" else "عادی 💾"
     mode = "🎬 مدیا" if settings.browser_mode == "media" else "📄 متن"
     return {"inline_keyboard": [
-        [{"text": "-۵", "callback_data": "rec_dec"},
-         {"text": f"⏱️ ضبط: {rec}s", "callback_data": "rec_null"},
-         {"text": "+۵", "callback_data": "rec_inc"}],
-        [{"text": f"▶️ پخش: {play}", "callback_data": "set_play"}],
+        [{"text": f"⏱️ زمان ضبط: {rec}s", "callback_data": "set_rec"}],
         [{"text": f"📥 دانلود: {dlm}", "callback_data": "set_dlmode"}],
         [{"text": f"🌐 حالت: {mode}", "callback_data": "set_brwmode"}],
         [{"text": "🔙 بازگشت", "callback_data": "back_main"}]
@@ -207,6 +204,11 @@ AD_DOMAINS = [
     "eroadvertising.com", "juicyads.com", "plugrush.com",
     "txxx.com", "fuckbook.com", "traffic-force.com", "bongacams.com",
     "trafficjunky.net", "adtng.com"
+]
+
+BLOCKED_AD_KEYWORDS = [
+    "ads", "advert", "popunder", "banner", "doubleclick", "taboola",
+    "outbrain", "popcash", "traffic", "monetize", "adx", "adserving"
 ]
 
 def get_or_create_context(chat_id):
@@ -238,7 +240,15 @@ def get_or_create_context(chat_id):
         vw = random.choice([412, 390, 414])
         vh = random.choice([915, 844, 896])
         context = _global_browser.new_context(viewport={"width": vw, "height": vh})
-        context.on("page", lambda page: page.close())
+        # فقط پاپ‌آپ‌های تبلیغاتی بسته شوند
+        def handle_popup(page):
+            try:
+                url = page.url.lower()
+                if any(kw in url for kw in BLOCKED_AD_KEYWORDS) or \
+                   any(ad in url for ad in AD_DOMAINS):
+                    page.close()
+            except: pass
+        context.on("page", handle_popup)
         if HAS_STEALTH:
             page = context.new_page()
             try: Stealth().apply_stealth(page)
@@ -254,8 +264,7 @@ def close_user_context(chat_id):
     if ctx:
         try: ctx["context"].close()
         except: pass
-
-# ═══════════════════════ استخراج هوشمند ═══════════════════════
+# ═══════════════════════ استخراج المان‌ها ═══════════════════════
 def extract_clickable_and_media(page, mode="text"):
     if mode == "text":
         raw = page.evaluate("""() => {
@@ -273,7 +282,7 @@ def extract_clickable_and_media(page, mode="text"):
         }""")
         links = [(t, txt, h) for t, txt, h in raw if h.startswith("http")]
         return links, []
-    else:
+    else:  # media mode
         video_sources = page.evaluate("""() => {
             const vids = [];
             document.querySelectorAll('video').forEach(v => {
@@ -293,6 +302,7 @@ def extract_clickable_and_media(page, mode="text"):
         return links, video_sources
 
 def scan_videos_smart(page):
+    # 1. عناصر visible
     elements = page.evaluate("""() => {
         const results = [];
         const centerX = window.innerWidth / 2;
@@ -318,6 +328,7 @@ def scan_videos_smart(page):
         return results;
     }""")
 
+    # 2. شبکه (HLS/DASH)
     network_urls = []
     def capture(response):
         ct = response.headers.get("content-type", "")
@@ -328,6 +339,7 @@ def scan_videos_smart(page):
     page.wait_for_timeout(3000)
     page.remove_listener("response", capture)
 
+    # 3. JSON درون اسکریپت‌ها
     json_urls = page.evaluate("""() => {
         const results = [];
         const scripts = document.querySelectorAll('script');
@@ -345,7 +357,7 @@ def scan_videos_smart(page):
         if not href.startswith("http"): continue
         parsed = urlparse(href)
         if any(ad in parsed.netloc for ad in AD_DOMAINS): continue
-        if any(kw in href.lower() for kw in ["/ad/", "/ads/", "/banner/", "/popup/", "/track/", "/pixel/"]): continue
+        if any(kw in href.lower() for kw in BLOCKED_AD_KEYWORDS): continue
         all_candidates.append({
             "text": (el["text"] + f" ({parsed.netloc})")[:35],
             "href": href,
@@ -452,12 +464,23 @@ def create_zip_and_split(src, base):
     os.remove(zp)
     return parts
 
-# ═══════════════════════ اسکرین‌شات ═══════════════════════
+# ═══════════════════════ اسکرین‌شات (پایه و 4K چندمرحله‌ای) ═══════════════════════
 def screenshot_full(context, url, out):
     page = context.new_page()
     try:
         page.goto(url, timeout=90000, wait_until="domcontentloaded")
         page.wait_for_timeout(2000)
+        page.screenshot(path=out, full_page=True)
+    finally: page.close()
+
+def screenshot_2x(context, url, out):
+    page = context.new_page()
+    try:
+        page.goto(url, timeout=90000, wait_until="domcontentloaded")
+        page.wait_for_timeout(2000)
+        # اعمال scale factor 2
+        page.evaluate("document.body.style.zoom = '200%'")
+        page.wait_for_timeout(500)
         page.screenshot(path=out, full_page=True)
     finally: page.close()
 
@@ -469,7 +492,6 @@ def screenshot_4k(context, url, out):
         page.wait_for_timeout(3000)
         page.screenshot(path=out, full_page=True)
     finally: page.close()
-
 # ═══════════════════════ دانلود کامل سایت ═══════════════════════
 def download_full_website(job):
     chat_id = job.chat_id
@@ -577,6 +599,25 @@ def job_queue_position(jid):
             pos += 1
     return -1
 
+def count_user_jobs(chat_id: int) -> int:
+    """تعداد jobهای فعال (queued + running) یک کاربر را برمی‌گرداند"""
+    q = load_queue()
+    count = 0
+    for item in q:
+        if item["chat_id"] == chat_id and item["status"] in ("queued", "running"):
+            count += 1
+    return count
+
+def kill_all_user_jobs(chat_id: int):
+    """تمام jobهای در حال اجرا و در صف یک کاربر را لغو می‌کند"""
+    with queue_lock:
+        q = load_queue()
+        for item in q:
+            if item["chat_id"] == chat_id and item["status"] in ("queued", "running"):
+                item["status"] = "cancelled"
+                item["updated_at"] = time.time()
+        save_queue(q)
+
 WORKERS_FILE = "workers.json"
 def load_workers():
     try:
@@ -645,6 +686,9 @@ def process_job(worker_id, job):
     if job.mode == "scan_videos":
         handle_scan_videos(job)
         return
+    if job.mode == "scan_downloads":
+        handle_scan_downloads(job)
+        return
 
     session.current_job_id = job.job_id
     set_session(session)
@@ -658,16 +702,28 @@ def process_job(worker_id, job):
             ctx = get_or_create_context(chat_id)
             spath = os.path.join(job_dir, "screenshot.png")
             screenshot_full(ctx, job.url, spath)
-            send_document(chat_id, spath, caption="✅ اسکرین‌شات")
+            send_document(chat_id, spath, caption="✅ اسکرین‌شات (مرحله ۱)")
+            kb = {"inline_keyboard": [
+                [{"text": "🔍 2x Zoom", "callback_data": f"req2x_{job.job_id}"},
+                 {"text": "🖼️ 4K", "callback_data": f"req4k_{job.job_id}"}]
+            ]}
+            send_message(chat_id, "کیفیت بالاتر:", reply_markup=kb)
+            job.status = "done"; update_job(job)
+        elif job.mode == "2x_screenshot":
+            send_message(chat_id, "🔍 2x Zoom...")
+            ctx = get_or_create_context(chat_id)
+            spath = os.path.join(job_dir, "screenshot_2x.png")
+            screenshot_2x(ctx, job.url, spath)
+            send_document(chat_id, spath, caption="✅ اسکرین‌شات 2x (مرحله ۲)")
             kb = {"inline_keyboard": [[{"text": "🖼️ 4K", "callback_data": f"req4k_{job.job_id}"}]]}
             send_message(chat_id, "کیفیت بالاتر:", reply_markup=kb)
             job.status = "done"; update_job(job)
         elif job.mode == "4k_screenshot":
-            send_message(chat_id, "🔍 4K...")
+            send_message(chat_id, "🖼️ 4K...")
             ctx = get_or_create_context(chat_id)
             spath = os.path.join(job_dir, "screenshot_4k.png")
             screenshot_4k(ctx, job.url, spath)
-            send_document(chat_id, spath, caption="✅ 4K")
+            send_document(chat_id, spath, caption="✅ اسکرین‌شات 4K (مرحله ۳)")
             job.status = "done"; update_job(job)
         elif job.mode == "download":
             handle_download(job, job_dir)
@@ -823,17 +879,54 @@ def handle_blind_download(job):
         send_message(chat_id, f"❌ دانلود کور ناموفق: {e}")
         job.status = "error"; update_job(job)
         shutil.rmtree(job_dir, ignore_errors=True)
+# ═══════════════════════ تشخیص موقعیت ویدیو و کلیک هوشمند ═══════════════════════
+def find_video_center(page):
+    """
+    بزرگترین المان video/iframe قابل مشاهده را پیدا کرده و مختصات مرکز آن را برمی‌گرداند.
+    اگر چیزی پیدا نشد، مرکز viewport را برمی‌گرداند.
+    """
+    coords = page.evaluate("""() => {
+        const centerX = window.innerWidth / 2;
+        const centerY = window.innerHeight / 2;
+        let best = null;
+        let bestArea = 0;
+        
+        // تگ‌های video
+        document.querySelectorAll('video').forEach(v => {
+            const rect = v.getBoundingClientRect();
+            if (rect.width < 200 || rect.height < 150) return;
+            const area = rect.width * rect.height;
+            if (area > bestArea) {
+                bestArea = area;
+                best = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+            }
+        });
+        
+        // iframeها
+        document.querySelectorAll('iframe').forEach(f => {
+            const rect = f.getBoundingClientRect();
+            if (rect.width < 300 || rect.height < 200) return;
+            const area = rect.width * rect.height;
+            if (area > bestArea) {
+                bestArea = area;
+                best = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+            }
+        });
+        
+        return best || { x: centerX, y: centerY };
+    }""")
+    return coords["x"], coords["y"]
 
-# ═══════════════════════ ضبط ویدیو ═══════════════════════
+# ═══════════════════════ ضبط ویدیو (با کلیک هوشمند) ═══════════════════════
 def handle_record_video(job):
     chat_id = job.chat_id
     session = get_session(chat_id)
     url = job.url
     rec_time = session.settings.record_time
-    auto_play = session.settings.auto_play_video
     job_dir = os.path.join("jobs_data", job.job_id)
     os.makedirs(job_dir, exist_ok=True)
     send_message(chat_id, f"🎬 ضبط {rec_time} ثانیه...")
+
     try:
         context = _global_browser.new_context(
             viewport={"width": 1280, "height": 720},
@@ -841,55 +934,85 @@ def handle_record_video(job):
             record_video_size={"width": 1280, "height": 720}
         )
         page = context.new_page()
+
+        # اعمال فیلتر تبلیغات در صورت فعال بودن
+        if session.ad_blocked_domains:
+            parsed = urlparse(url)
+            if parsed.netloc.lower() in session.ad_blocked_domains:
+                page.route("**/*", lambda route: route.abort()
+                           if any(ad in route.request.url for ad in AD_DOMAINS)
+                           else route.continue_())
+
         try:
             page.goto(url, timeout=60000, wait_until="domcontentloaded")
+            # ۲ ثانیه صبر کن
             page.wait_for_timeout(2000)
-            if auto_play:
-                try: page.evaluate("() => { const v = document.querySelector('video'); if (v) v.play(); }")
-                except: pass
-                try:
-                    page.click('.vjs-big-play-button, .plyr__control--overlaid, button[aria-label="Play"]', timeout=3000)
-                except: pass
-                time.sleep(1)
-                try: page.evaluate("() => { const v = document.querySelector('video'); if (v) v.play(); }")
-                except: pass
+
+            # کلیک هوشمند: برو به مرکز بزرگ‌ترین ویدیو
+            vx, vy = find_video_center(page)
+            page.mouse.click(vx, vy)
+
+            # تلاش JS برای play()
+            try:
+                page.evaluate("() => { const v = document.querySelector('video'); if (v) v.play(); }")
+            except: pass
+
+            # ضبط
             page.wait_for_timeout(rec_time * 1000)
         finally:
-            page.close(); context.close()
+            page.close()
+            context.close()
 
+        # پیدا کردن فایل webm
         webm = None
         for f in os.listdir(job_dir):
-            if f.endswith('.webm'): webm = os.path.join(job_dir, f); break
+            if f.endswith('.webm'):
+                webm = os.path.join(job_dir, f); break
         if not webm:
-            send_message(chat_id, "❌ ویدیویی ضبط نشد."); job.status = "error"; update_job(job); return
+            send_message(chat_id, "❌ ویدیویی ضبط نشد.")
+            job.status = "error"; update_job(job)
+            return
 
+        # تبدیل به mkv در صورت وجود ffmpeg
         if shutil.which('ffmpeg'):
             mkv_path = webm.replace('.webm', '.mkv')
             try:
                 subprocess.run(['ffmpeg', '-y', '-i', webm, '-c', 'copy', mkv_path],
                                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
                 final = mkv_path if os.path.exists(mkv_path) else webm
-            except: final = webm
-        else: final = webm
+            except:
+                final = webm
+        else:
+            final = webm
 
         if os.path.getsize(final) > ZIP_PART_SIZE:
             parts = split_file_binary(final, "record", os.path.splitext(final)[1])
             for idx, p in enumerate(parts, 1):
                 send_document(chat_id, p, caption=f"🎬 پارت {idx}/{len(parts)}")
-        else: send_document(chat_id, final, caption="🎬 ویدیوی ضبط‌شده")
+        else:
+            send_document(chat_id, final, caption="🎬 ویدیوی ضبط‌شده")
         job.status = "done"; update_job(job)
     except Exception as e:
         send_message(chat_id, f"❌ خطا: {e}")
         job.status = "error"; update_job(job)
-    finally: shutil.rmtree(job_dir, ignore_errors=True)
+    finally:
+        shutil.rmtree(job_dir, ignore_errors=True)
 
-# ═══════════════════════ مرورگر + اسکن ویدیو ═══════════════════════
+# ═══════════════════════ مرورگر (با دکمه‌های جدید) ═══════════════════════
 def handle_browser(job, job_dir):
     chat_id = job.chat_id
     session = get_session(chat_id)
     mode = session.settings.browser_mode
     ctx = get_or_create_context(chat_id)
     page = ctx.new_page()
+
+    # اعمال فیلتر تبلیغات اگر دامنه مسدود باشد
+    parsed_url = urlparse(job.url)
+    if parsed_url.netloc.lower() in (session.ad_blocked_domains or []):
+        page.route("**/*", lambda route: route.abort()
+                   if any(ad in route.request.url for ad in AD_DOMAINS)
+                   else route.continue_())
+
     try:
         page.goto(job.url, timeout=60000, wait_until="domcontentloaded")
         page.wait_for_timeout(2000)
@@ -910,11 +1033,12 @@ def handle_browser(job, job_dir):
         session.browser_links = all_links
         session.browser_page = 0
         set_session(session)
-        send_browser_page(chat_id, spath, job.url, 0)
+        send_browser_page(chat_id, spath, job.url, 0, page)
         job.status = "done"; update_job(job)
-    finally: page.close()
+    finally:
+        page.close()
 
-def send_browser_page(chat_id, image_path=None, url="", page_num=0):
+def send_browser_page(chat_id, image_path=None, url="", page_num=0, page=None):
     session = get_session(chat_id)
     all_links = session.browser_links or []
     per_page = 10
@@ -935,21 +1059,34 @@ def send_browser_page(chat_id, image_path=None, url="", page_num=0):
         idx += 1
     if row: keyboard_rows.append(row)
 
+    # ناوبری
     nav = []
     if page_num > 0: nav.append({"text": "◀️", "callback_data": f"bpg_{chat_id}_{page_num-1}"})
     if end < len(all_links): nav.append({"text": "▶️", "callback_data": f"bpg_{chat_id}_{page_num+1}"})
     if nav: keyboard_rows.append(nav)
 
+    # دکمه‌های ویژه بر اساس حالت
     if session.settings.browser_mode == "media":
         keyboard_rows.append([{"text": "🎬 اسکن ویدیوها", "callback_data": f"scvid_{chat_id}"}])
+        # دکمهٔ مسدودساز تبلیغات
+        parsed_url = urlparse(url)
+        current_domain = parsed_url.netloc.lower()
+        is_blocked = current_domain in (session.ad_blocked_domains or [])
+        ad_text = "🛡️ تبلیغات: روشن" if is_blocked else "🛡️ تبلیغات: خاموش"
+        keyboard_rows.append([{"text": ad_text, "callback_data": f"adblock_{chat_id}"}])
+    else:
+        keyboard_rows.append([{"text": "📦 جستجوی فایل‌ها", "callback_data": f"scdl_{chat_id}"}])
+
     keyboard_rows.append([{"text": "🎬 ضبط", "callback_data": f"recvid_{chat_id}"}])
     keyboard_rows.append([{"text": "🌐 دانلود سایت", "callback_data": f"dlweb_{chat_id}"}])
     keyboard_rows.append([{"text": "❌ بستن", "callback_data": f"closebrowser_{chat_id}"}])
 
     kb = {"inline_keyboard": keyboard_rows}
-    if image_path: send_document(chat_id, image_path, caption=f"🌐 {url}")
+    if image_path:
+        send_document(chat_id, image_path, caption=f"🌐 {url}")
     send_message(chat_id, f"صفحه {page_num+1}/{math.ceil(len(all_links)/per_page)}", reply_markup=kb)
 
+    # لینک‌های اضافی با دستور /a
     extra = all_links[end:]
     if extra:
         cmds = {}
@@ -962,6 +1099,7 @@ def send_browser_page(chat_id, image_path=None, url="", page_num=0):
         session.text_links = cmds
         set_session(session)
 
+# ═══════════════════════ اسکن ویدیوها ═══════════════════════
 def handle_scan_videos(job):
     chat_id = job.chat_id
     session = get_session(chat_id)
@@ -991,27 +1129,121 @@ def handle_scan_videos(job):
         job.status = "error"; update_job(job)
     finally: page.close()
 
+# ═══════════════════════ جستجوی فایل‌های قابل دانلود ═══════════════════════
+def handle_scan_downloads(job):
+    chat_id = job.chat_id
+    session = get_session(chat_id)
+    url = session.browser_url
+    if not url:
+        send_message(chat_id, "❌ صفحه‌ای برای جستجو باز نیست.")
+        return
+
+    send_message(chat_id, "🔎 در حال جستجوی فایل‌های قابل دانلود...")
+    found_links = set()
+
+    # 1. استخراج مستقیم از صفحه فعلی
+    try:
+        ctx = get_or_create_context(chat_id)
+        page = ctx.new_page()
+        page.goto(url, timeout=30000, wait_until="domcontentloaded")
+        page.wait_for_timeout(1000)
+        all_hrefs = page.evaluate("""() => {
+            return Array.from(document.querySelectorAll('a[href]'))
+                        .map(a => a.href).filter(h => h.startsWith('http'));
+        }""")
+        page.close()
+        for href in all_hrefs:
+            if is_direct_file_url(href):
+                found_links.add(href)
+    except: pass
+
+    # 2. کراول برای یافتن فایل‌های غیرمستقیم
+    try:
+        s = requests.Session()
+        s.headers.update({"User-Agent": "Mozilla/5.0"})
+        resp = s.get(url, timeout=10)
+        if resp.status_code == 200 and "text/html" in resp.headers.get("Content-Type", ""):
+            soup = BeautifulSoup(resp.text, "html.parser")
+            for a in soup.find_all("a", href=True):
+                href = urljoin(url, a["href"])
+                parsed = urlparse(href)
+                if any(ad in parsed.netloc for ad in AD_DOMAINS): continue
+                if any(kw in href.lower() for kw in BLOCKED_AD_KEYWORDS): continue
+                if is_direct_file_url(href):
+                    found_links.add(href)
+                else:
+                    found = crawl_for_download_link(href)
+                    if found:
+                        found_links.add(found)
+    except: pass
+
+    if not found_links:
+        send_message(chat_id, "🚫 هیچ فایل قابل دانلودی یافت نشد.")
+        job.status = "done"; update_job(job)
+        return
+
+    # ساخت خروجی با دستور /d
+    final_results = []
+    for link in found_links:
+        fname = get_filename_from_url(link)
+        size_str = "نامشخص"
+        try:
+            head = requests.head(link, timeout=5, allow_redirects=True)
+            if head.headers.get("Content-Length"):
+                size_str = f"{int(head.headers.get('Content-Length'))/1024/1024:.2f} MB"
+        except: pass
+        final_results.append({"name": fname[:30], "url": link, "size": size_str})
+
+    lines = [f"📦 **{len(final_results)} فایل یافت شد:**"]
+    cmds = {}
+    for i, f in enumerate(final_results[:15]):
+        cmd = f"/d{hashlib.md5(f['url'].encode()).hexdigest()[:5]}"
+        cmds[cmd] = f['url']
+        lines.append(f"{i+1}. {f['name']} ({f['size']})")
+        lines.append(f"   📥 {cmd}")
+    send_message(chat_id, "\n".join(lines))
+    session.text_links = {**session.text_links, **cmds} if session.text_links else cmds
+    set_session(session)
+    job.status = "done"; update_job(job)
+
 # ═══════════════════════ پنل ادمین ═══════════════════════
 def admin_panel(chat_id):
     try:
-        # وضعیت حافظه
         mem = subprocess.run(['free', '-m'], stdout=subprocess.PIPE, text=True).stdout.strip()
-        # وضعیت دیسک
         disk = subprocess.run(['df', '-h'], stdout=subprocess.PIPE, text=True).stdout.strip()
-        # uptime
         uptime = subprocess.run(['uptime'], stdout=subprocess.PIPE, text=True).stdout.strip()
-        # تعداد کاربران فعال
         sessions = load_sessions()
         active_users = len(sessions)
         msg = f"🛠️ **پنل ادمین**\n\n💾 **حافظه:**\n{mem}\n\n📀 **دیسک:**\n{disk}\n\n⏱️ **آپ‌تایم:**\n{uptime}\n\n👥 **کاربران فعال:** {active_users}"
         send_message(chat_id, msg)
     except Exception as e:
         send_message(chat_id, f"❌ خطا در دریافت اطلاعات: {e}")
-
 # ═══════════════════════ مدیریت پیام و Callback ═══════════════════════
 def handle_message(chat_id, text):
     session = get_session(chat_id)
     text = text.strip()
+
+    # 💀 دستور /kill – اولویت مطلق
+    if text == "/kill":
+        if not session.is_pro and not session.is_admin:
+            send_message(chat_id, "⛔ دسترسی غیرمجاز.")
+            return
+        # کشتن تمام jobهای در صف و در حال اجرا
+        kill_all_user_jobs(chat_id)
+        # بستن مرورگر
+        close_user_context(chat_id)
+        # ریست session با حفظ اشتراک
+        was_pro = session.is_pro
+        was_admin = session.is_admin
+        session = SessionState(chat_id=chat_id)
+        session.is_pro = was_pro
+        session.is_admin = was_admin
+        session.state = "idle"
+        session.click_counter = 0
+        set_session(session)
+        send_message(chat_id, "💀 تمام فعالیت‌ها متوقف و وضعیت به روز اول برگردانده شد.", reply_markup=main_menu_keyboard(session.is_admin))
+        return
+
     if text == "/start":
         session.state = "idle"; session.click_counter = 0; set_session(session)
         if session.is_admin or session.is_pro:
@@ -1019,12 +1251,14 @@ def handle_message(chat_id, text):
         else:
             send_message(chat_id, "👋 کد پرو را وارد کنید:")
         return
+
     if text == "/cancel":
         session.state = "idle"; session.cancel_requested = True; session.current_job_id = None
         session.click_counter = 0; set_session(session)
         close_user_context(chat_id)
         send_message(chat_id, "⏹️ لغو شد.", reply_markup=main_menu_keyboard(session.is_admin))
         return
+
     if not session.is_pro and not session.is_admin:
         if text in PRO_CODES:
             session.is_pro = True; set_session(session)
@@ -1032,13 +1266,34 @@ def handle_message(chat_id, text):
         else:
             send_message(chat_id, "⛔ کد نامعتبر")
         return
+
+    # حالت browsing: قبول دستورهای /a، /o، /d
     if session.state == "browsing":
         if session.text_links and text in session.text_links:
             url = session.text_links.pop(text)
             set_session(session)
-            if text.startswith("/o"): enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="download", url=url))
-            else: enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="browser", url=url))
+            if text.startswith("/o") or text.startswith("/d"):
+                enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="download", url=url))
+            else:
+                enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="browser", url=url))
         return
+
+    # حالت انتظار عدد برای زمان ضبط
+    if session.state == "waiting_record_time":
+        try:
+            val = int(text)
+            if 1 <= val <= 30:
+                session.settings.record_time = val
+                session.state = "idle"
+                set_session(session)
+                send_message(chat_id, f"⏱️ زمان ضبط روی {val} ثانیه تنظیم شد.", reply_markup=settings_keyboard(session.settings))
+            else:
+                send_message(chat_id, "❌ لطفاً عددی بین ۱ تا ۳۰ وارد کنید.")
+        except:
+            send_message(chat_id, "❌ لطفاً یک عدد معتبر بین ۱ تا ۳۰ وارد کنید.")
+        return
+
+    # حالت‌های انتظار URL
     if session.state.startswith("waiting_url_"):
         url = text
         if not (url.startswith("http://") or url.startswith("https://")):
@@ -1050,12 +1305,17 @@ def handle_message(chat_id, text):
         }
         mode = mode_map.get(session.state, "screenshot")
         job = Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode=mode, url=url)
+        # محدودیت صف (۲ تایی)
+        if not session.is_admin and count_user_jobs(chat_id) >= 2:
+            send_message(chat_id, "🛑 صف پردازش پر است (حداکثر ۲). لطفاً کمی صبر کنید یا /kill را بزنید.")
+            return
         enqueue(job)
         session.state = "idle"; session.current_job_id = job.job_id
         set_session(session)
         pos = job_queue_position(job.job_id)
         send_message(chat_id, f"✅ در صف (نوبت {pos})" if pos != 1 else "✅ در صف قرار گرفت.")
         return
+
     send_message(chat_id, "از منو استفاده کنید:", reply_markup=main_menu_keyboard(session.is_admin))
 
 def handle_callback(cq):
@@ -1067,11 +1327,12 @@ def handle_callback(cq):
     # محدودیت کلیک (۵ بار) برای غیر ادمین
     if not session.is_admin:
         if session.click_counter >= 5:
-            answer_callback_query(cid, "⛔ شما به حداکثر تعداد کلیک (۵) رسیده‌اید. لطفاً کمی صبر کنید یا /cancel را بزنید.", show_alert=True)
+            answer_callback_query(cid, "⛔ به حداکثر کلیک (۵) رسیدید. /cancel را بزنید.", show_alert=True)
             return
         session.click_counter += 1
         set_session(session)
 
+    # منوی اصلی
     if data == "menu_screenshot":
         session.state = "waiting_url_screenshot"; set_session(session); send_message(chat_id, "📸 URL:")
     elif data == "menu_download":
@@ -1088,12 +1349,33 @@ def handle_callback(cq):
         session.click_counter = 0; set_session(session)
         close_user_context(chat_id)
         send_message(chat_id, "✅ لغو شد.", reply_markup=main_menu_keyboard(session.is_admin))
-    elif data in ("rec_dec","rec_inc","set_play","set_dlmode","set_brwmode","back_main"):
-        settings_callback(data, chat_id, session)
+
+    # تنظیمات
+    elif data == "set_rec":
+        session.state = "waiting_record_time"; set_session(session)
+        send_message(chat_id, "⏱️ زمان ضبط را به ثانیه وارد کنید (۱ تا ۳۰):")
+    elif data == "set_dlmode":
+        session.settings.default_download_mode = "stream" if session.settings.default_download_mode == "store" else "store"
+        set_session(session)
+        send_message(chat_id, "تنظیمات:", reply_markup=settings_keyboard(session.settings))
+    elif data == "set_brwmode":
+        session.settings.browser_mode = "media" if session.settings.browser_mode == "text" else "text"
+        set_session(session)
+        send_message(chat_id, "تنظیمات:", reply_markup=settings_keyboard(session.settings))
+    elif data == "back_main":
+        send_message(chat_id, "منوی اصلی:", reply_markup=main_menu_keyboard(session.is_admin))
+
+    # اسکرین‌شات‌های چندمرحله‌ای
+    elif data.startswith("req2x_"):
+        jid = data[6:]; job = find_job(jid)
+        if job and job.status == "done":
+            enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="2x_screenshot", url=job.url))
     elif data.startswith("req4k_"):
         jid = data[6:]; job = find_job(jid)
         if job and job.status == "done":
             enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="4k_screenshot", url=job.url))
+
+    # دانلود ZIP/اصلی
     elif data.startswith("dlzip_") or data.startswith("dlraw_"):
         jid = data[6:] if data.startswith("dlzip_") else data[6:]; job = find_job(jid)
         if job and job.extra:
@@ -1108,42 +1390,84 @@ def handle_callback(cq):
         jid = data[10:]; job = find_job(jid)
         if job: job.status = "cancelled"; update_job(job)
         send_message(chat_id, "❌ لغو شد.", reply_markup=main_menu_keyboard(session.is_admin))
+
+    # ناوبری مرورگر
     elif data.startswith("nav_"):
         parts = data.split("_", 2)
         if len(parts) >= 3:
             cb = f"{parts[0]}_{parts[1]}_{parts[2]}"
             with callback_map_lock: url = callback_map.pop(cb, None)
-            if url: enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="browser", url=url))
+            if url:
+                if session.is_admin or count_user_jobs(chat_id) < 2:
+                    enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="browser", url=url))
+                else:
+                    answer_callback_query(cid, "🛑 صف پر است.")
     elif data.startswith("dlvid_"):
         parts = data.split("_", 2)
         if len(parts) >= 3:
             cb = f"{parts[0]}_{parts[1]}_{parts[2]}"
             with callback_map_lock: url = callback_map.pop(cb, None)
-            if url: enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="download", url=url))
-    elif data.startswith("scvid_"): enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="scan_videos", url=""))
+            if url:
+                if session.is_admin or count_user_jobs(chat_id) < 2:
+                    enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="download", url=url))
+                else:
+                    answer_callback_query(cid, "🛑 صف پر است.")
+
+    # اسکن ویدیوها
+    elif data.startswith("scvid_"):
+        enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="scan_videos", url=""))
+    # جستجوی فایل‌ها
+    elif data.startswith("scdl_"):
+        enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="scan_downloads", url=""))
+
+    # ضبط ویدیو
     elif data.startswith("recvid_"):
-        if session.browser_url: enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="record_video", url=session.browser_url))
+        if session.browser_url:
+            if session.is_admin or count_user_jobs(chat_id) < 2:
+                enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="record_video", url=session.browser_url))
+            else:
+                answer_callback_query(cid, "🛑 صف پر است.")
+
+    # دانلود سایت
     elif data.startswith("dlweb_"):
-        if session.browser_url: enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="download_website", url=session.browser_url))
+        if session.browser_url:
+            if session.is_admin or count_user_jobs(chat_id) < 2:
+                enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="download_website", url=session.browser_url))
+            else:
+                answer_callback_query(cid, "🛑 صف پر است.")
+
+    # صفحه‌بندی مرورگر
     elif data.startswith("bpg_"):
         parts = data.split("_")
         if len(parts) == 3:
             page = int(parts[2]); session.browser_page = page; set_session(session)
             send_browser_page(chat_id, page_num=page)
+
+    # مسدودساز تبلیغات
+    elif data.startswith("adblock_"):
+        parsed_url = urlparse(session.browser_url or "")
+        current_domain = parsed_url.netloc.lower()
+        if not current_domain:
+            answer_callback_query(cid, "دامنه‌ای برای مسدودسازی شناسایی نشد.")
+            return
+        if session.ad_blocked_domains is None:
+            session.ad_blocked_domains = []
+        if current_domain in session.ad_blocked_domains:
+            session.ad_blocked_domains.remove(current_domain)
+            answer_callback_query(cid, "🛡️ مسدودساز غیرفعال شد.")
+        else:
+            session.ad_blocked_domains.append(current_domain)
+            answer_callback_query(cid, "🛡️ مسدودساز فعال شد.")
+        set_session(session)
+        send_browser_page(chat_id, page_num=session.browser_page)
+
+    # بستن مرورگر
     elif data.startswith("closebrowser_"):
         close_user_context(chat_id); session.state = "idle"; session.click_counter = 0; set_session(session)
         send_message(chat_id, "🧭 بسته شد.", reply_markup=main_menu_keyboard(session.is_admin))
-    else: answer_callback_query(cid)
 
-def settings_callback(data, chat_id, session):
-    if data == "rec_dec": session.settings.record_time = max(5, session.settings.record_time - 5)
-    elif data == "rec_inc": session.settings.record_time = min(120, session.settings.record_time + 5)
-    elif data == "set_play": session.settings.auto_play_video = not session.settings.auto_play_video
-    elif data == "set_dlmode": session.settings.default_download_mode = "stream" if session.settings.default_download_mode == "store" else "store"
-    elif data == "set_brwmode": session.settings.browser_mode = "media" if session.settings.browser_mode == "text" else "text"
-    set_session(session)
-    if data != "back_main": send_message(chat_id, "تنظیمات:", reply_markup=settings_keyboard(session.settings))
-    else: send_message(chat_id, "منوی اصلی:", reply_markup=main_menu_keyboard(session.is_admin))
+    else:
+        answer_callback_query(cid)
 
 # ═══════════════════════ Polling و Main ═══════════════════════
 def polling_loop(stop_event):
@@ -1156,7 +1480,8 @@ def polling_loop(stop_event):
             offset = upd["update_id"] + 1
             if "message" in upd and "text" in upd["message"]:
                 handle_message(upd["message"]["chat"]["id"], upd["message"]["text"])
-            elif "callback_query" in upd: handle_callback(upd["callback_query"])
+            elif "callback_query" in upd:
+                handle_callback(upd["callback_query"])
 
 def main():
     os.makedirs("jobs_data", exist_ok=True)
