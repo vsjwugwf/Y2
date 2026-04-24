@@ -24,7 +24,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests playwright beautifulsoup4 yt-dlp
 
-      - name: Install Playwright Chromium (browser only)
+      - name: Install Playwright Chromium
         run: |
           python -m playwright install chromium
 
@@ -32,4 +32,4 @@ jobs:
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
         run: |
-          python Bot9.py
+          python Bot9S-2.py
