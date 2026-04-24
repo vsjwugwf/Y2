@@ -1,4 +1,4 @@
-name: Bale Bot Pro Runner v9
+name: Bale Bot Runner v9
 
 on:
   workflow_dispatch:
@@ -19,19 +19,15 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install system dependencies
-        run: |
-          apt-get update --yes
-          apt-get install --yes ffmpeg wget
-
       - name: Install Python dependencies
         run: |
-          pip install --upgrade pip
+          python -m pip install --upgrade pip
           pip install requests playwright beautifulsoup4 yt-dlp
 
-      - name: Install Playwright Chromium
+      - name: Install Playwright Chromium (and system deps)
         run: |
-          playwright install chromium
+          python -m playwright install chromium
+          python -m playwright install-deps chromium   # خودش ffmpeg و غیره را نصب می‌کند ✅
 
       - name: Run bot
         env:
