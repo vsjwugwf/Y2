@@ -253,8 +253,29 @@ def check_rate_limit(chat_id: int, mode: str, file_size_bytes: Optional[int] = N
         else:
             return f"⏰ محدودیت روزانه: حداکثر {max_count} بار در روز (سطح {level})."
 
-    return None
+    return True, ""
 
+def activate_subscription(chat_id: int, code: str) -> Optional[str]:
+    """بررسی کد اشتراک و فعال‌سازی سطح مربوطه. برمی‌گرداند سطح فعال‌شده یا None"""
+    code = code.strip()
+    if code in PRO_CODES:
+        level = "pro"
+    elif code in PLUS_CODES:
+        level = "plus"
+    elif code in BRONZE_CODES:
+        level = "bronze"
+    else:
+        return None
+
+    set_user_subscription(chat_id, level)
+    session = get_session(chat_id)
+    session.subscription = level
+    session.is_pro = True
+    set_session(session)
+    return level
+
+# ═══════════════════════ ذخیره‌سازی محلی Sessionها ═══════════════════════
+SESSIONS_FILE = "sessions.json"
 # ═══════════════════════ ذخیره‌سازی محلی Sessionها ═══════════════════════
 SESSIONS_FILE = "sessions.json"
 def load_sessions():
