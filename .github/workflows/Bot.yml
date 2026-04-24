@@ -24,12 +24,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests playwright beautifulsoup4 yt-dlp
 
-      - name: Install Playwright Chromium
+      # تغییر مهم: نصب وابستگی‌های سیستمی مرورگر
+      - name: Install Playwright Chromium & Dependencies
         run: |
           python -m playwright install chromium
+          python -m playwright install-deps chromium
+
+      - name: Debug token length
+        env:
+          BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
+        run: |
+          echo "Token length: ${#BALE_BOT_TOKEN}"
 
       - name: Run bot
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
         run: |
-          python Bot9S-2.py
+          python bot.py
+          
