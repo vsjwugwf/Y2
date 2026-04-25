@@ -1,4 +1,4 @@
-name: yooooooooo
+name: let goooooooooo
 
 on:
   workflow_dispatch:
@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install system dependencies (PulseAudio for audio capture)
+      - name: Install system dependencies (PulseAudio + ffmpeg)
         run: |
           sudo apt-get update
           sudo apt-get install -y pulseaudio pulseaudio-utils ffmpeg
