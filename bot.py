@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ربات بله – نسخهٔ ۲۰ (Ultimate Pro) — با رفع Thread
-مرورگر سه حالته + حالت ناشناس، ضبط ویدیو با صدا (snd-aloop)،
-انتخاب فرمت خروجی (MKV/MP4/WebM)، دو Context (عمومی و ضبط)،
-ویرایش پیام‌ها به‌جای ارسال جدید،
-اسکن ویدیو/فایل، دانلودر هوشمند، ۳ Worker با صف مجزا برای ضبط.
+ربات بله – نسخهٔ ۲۱ (Polished & Thread‑Safe)
+مرورگر سه حالته + ناشناس پیشرفته، ضبط ویدیو با صدا (snd-aloop)،
+انتخاب فرمت خروجی (MKV/MP4/WebM)، دو صف مجزا با find_job یکپارچه،
+مدیریت هوشمند پیام‌ها (حذف/ویرایش)، دیباگ کامل.
 """
 
 import os, sys, json, time, math, queue, shutil, zipfile, uuid, re, hashlib
@@ -27,12 +26,12 @@ if not BALE_BOT_TOKEN:
 BALE_API_URL = "https://tapi.bale.ai/bot" + BALE_BOT_TOKEN
 REQUEST_TIMEOUT = 30
 LONG_POLL_TIMEOUT = 50
-WORKER_COUNT = 3                     # ۲ عمومی + ۱ ضبط
+WORKER_COUNT = 3
 ZIP_PART_SIZE = int(19 * 1024 * 1024)
 
 ADMIN_CHAT_ID = 46829437
 
-# ═══════════════════════ کدهای اشتراک (مطابق درخواست) ═══════════════════════
+# ═══════════════════════ کدهای اشتراک ═══════════════════════
 DEFAULT_CODES = {
     "bronze": ["B826USH","B83HSIW","B27627SGSH","BSUWH8272","B7272GS6",
                "BHSWG827","BEJEJEI33","BI3U37EG","BEUEYE83HE","BRONZE10"],
@@ -40,7 +39,6 @@ DEFAULT_CODES = {
     "pro":    ["PR282UEH","PR82HEBD8","PRUEGEI3E","PRHSU38EGD","PR83HEDH"]
 }
 
-# ═══════════════════════ محدودیت‌های مصرف ═══════════════════════
 LIMITS = {
     "free": {
         "browser": (2, 3600, None), "screenshot": (2, 3600, None),
@@ -79,9 +77,6 @@ subscriptions_lock = threading.Lock()
 callback_map: Dict[str, str] = {}
 callback_map_lock = threading.Lock()
 browser_contexts_lock = threading.Lock()
-
-# صف جداگانه برای ضبط ویدیو
-record_queue = queue.Queue()
 record_queue_lock = threading.Lock()
 
 def safe_print(*args, **kwargs):
@@ -93,12 +88,12 @@ def safe_print(*args, **kwargs):
 class UserSettings:
     record_time: int = 20
     default_download_mode: str = "store"
-    browser_mode: str = "text"          # "text", "media", "explorer"
+    browser_mode: str = "text"          # text, media, explorer
     deep_scan_mode: str = "logical"
     record_behavior: str = "click"
-    audio_enabled: bool = False         # ★ ضبط صدا فعال؟
-    video_format: str = "webm"          # ★ "webm", "mkv", "mp4"
-    incognito_mode: bool = False        # ★ حالت ناشناس
+    audio_enabled: bool = False
+    video_format: str = "webm"
+    incognito_mode: bool = False
 
 @dataclass
 class SessionState:
@@ -119,8 +114,11 @@ class SessionState:
     ad_blocked_domains: Optional[List[str]] = field(default_factory=list)
     found_downloads: Optional[List[Dict[str, str]]] = None
     found_downloads_page: int = 0
-    # شناسه آخرین پیام تنظیمات برای ویرایش
-    last_settings_msg_id: Optional[str] = None  # ★
+    # شناسه پیام‌های کلیدی
+    main_menu_msg_id: Optional[str] = None
+    settings_msg_id: Optional[str] = None
+    browser_page_msg_id: Optional[str] = None
+    prompt_msg_id: Optional[str] = None
 
 @dataclass
 class Job:
@@ -140,39 +138,34 @@ class WorkerInfo:
     worker_id: int
     current_job_id: Optional[str] = None
     status: str = "idle"
-    worker_type: str = "general"   # "general" یا "record"
+    worker_type: str = "general"
 
 # ═══════════════════════ مدیریت اشتراک‌ها ═══════════════════════
 SUBSCRIPTIONS_FILE = "subscriptions.json"
 SERVICE_DISABLED_FLAG = "service_disabled.flag"
 
-def load_subscriptions() -> Dict[str, Any]:
+def load_subscriptions():
     try:
-        with open(SUBSCRIPTIONS_FILE, "r") as f: data = json.load(f)
-    except: data = {}
-    if "valid_codes" not in data:
-        data["valid_codes"] = DEFAULT_CODES.copy()
-        save_subscriptions(data)
-    return data
-
-def save_subscriptions(data: Dict[str, Any]):
+        with open(SUBSCRIPTIONS_FILE, "r") as f: return json.load(f)
+    except: return {}
+def save_subscriptions(data):
     tmp = SUBSCRIPTIONS_FILE + ".tmp"
     with open(tmp, "w") as f: json.dump(data, f)
     os.replace(tmp, SUBSCRIPTIONS_FILE)
 
-def get_user_subscription(chat_id: int) -> Tuple[str, Optional[Dict[str, Any]]]:
+def get_user_subscription(chat_id):
     data = load_subscriptions()
     key = str(chat_id)
     if key in data and "level" in data[key]: return data[key]["level"], data[key]
     return "free", None
 
-def set_user_subscription(chat_id: int, level: str):
+def set_user_subscription(chat_id, level):
     with subscriptions_lock:
         data = load_subscriptions()
         data[str(chat_id)] = {"level": level, "activated_at": time.time(), "usage": {}}
         save_subscriptions(data)
 
-def activate_subscription(chat_id: int, code: str) -> Optional[str]:
+def activate_subscription(chat_id, code):
     code = code.strip()
     data = load_subscriptions()
     codes = data.get("valid_codes", DEFAULT_CODES)
@@ -186,7 +179,7 @@ def activate_subscription(chat_id: int, code: str) -> Optional[str]:
             return level
     return None
 
-def add_subscription_code(level: str, code: str) -> bool:
+def add_subscription_code(level, code):
     with subscriptions_lock:
         data = load_subscriptions()
         codes = data.setdefault("valid_codes", DEFAULT_CODES.copy())
@@ -196,7 +189,7 @@ def add_subscription_code(level: str, code: str) -> bool:
         save_subscriptions(data)
         return True
 
-def remove_subscription_code(code: str) -> Optional[str]:
+def remove_subscription_code(code):
     with subscriptions_lock:
         data = load_subscriptions()
         codes = data.get("valid_codes", {})
@@ -205,9 +198,9 @@ def remove_subscription_code(code: str) -> Optional[str]:
                 code_list.remove(code)
                 save_subscriptions(data)
                 return level
-        return None
+    return None
 
-def is_service_disabled() -> bool:
+def is_service_disabled():
     return os.path.exists(SERVICE_DISABLED_FLAG)
 
 def toggle_service():
@@ -218,7 +211,7 @@ def toggle_service():
         with open(SERVICE_DISABLED_FLAG, "w") as f: f.write("disabled")
         return True
 
-def check_rate_limit(chat_id: int, mode: str, file_size_bytes: Optional[int] = None) -> Optional[str]:
+def check_rate_limit(chat_id, mode, file_size_bytes=None):
     if chat_id == ADMIN_CHAT_ID: return None
     level, _ = get_user_subscription(chat_id)
     limits = LIMITS.get(level, LIMITS["free"])
@@ -242,7 +235,7 @@ def check_rate_limit(chat_id: int, mode: str, file_size_bytes: Optional[int] = N
     update_usage(chat_id, mode_key)
     return None
 
-def update_usage(chat_id: int, mode: str):
+def update_usage(chat_id, mode):
     with subscriptions_lock:
         data = load_subscriptions()
         key = str(chat_id)
@@ -269,7 +262,9 @@ def get_session(chat_id):
         d = data[key]
         for k, v in d.items():
             if k == "settings": s.settings = UserSettings(**v)
-            elif k in ("ad_blocked_domains", "found_downloads", "last_settings_msg_id"):
+            elif k in ("ad_blocked_domains", "found_downloads",
+                       "main_menu_msg_id", "settings_msg_id",
+                       "browser_page_msg_id", "prompt_msg_id"):
                 setattr(s, k, v)
             else: setattr(s, k, v)
         if s.chat_id == ADMIN_CHAT_ID: s.is_admin = True; s.subscription = "pro"
@@ -286,11 +281,14 @@ def set_session(session):
     d["settings"] = asdict(session.settings)
     d["ad_blocked_domains"] = session.ad_blocked_domains
     d["found_downloads"] = session.found_downloads
-    d["last_settings_msg_id"] = session.last_settings_msg_id
+    d["main_menu_msg_id"] = session.main_menu_msg_id
+    d["settings_msg_id"] = session.settings_msg_id
+    d["browser_page_msg_id"] = session.browser_page_msg_id
+    d["prompt_msg_id"] = session.prompt_msg_id
     data[str(session.chat_id)] = d
     save_sessions(data)
 
-# ═══════════════════════ API بله (با ویرایش پیام) ═══════════════════════
+# ═══════════════════════ API بله (با حذف و ویرایش پیام) ═══════════════════════
 def bale_request(method, params=None, files=None):
     url = f"{BALE_API_URL}/{method}"
     try:
@@ -306,6 +304,9 @@ def send_message(chat_id, text, reply_markup=None):
     params = {"chat_id": chat_id, "text": text}
     if reply_markup: params["reply_markup"] = json.dumps(reply_markup)
     return bale_request("sendMessage", params=params)
+
+def delete_message(chat_id, message_id):
+    return bale_request("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
 
 def edit_message_text(chat_id, message_id, text, reply_markup=None):
     params = {"chat_id": chat_id, "message_id": message_id, "text": text}
@@ -367,7 +368,7 @@ def settings_keyboard(settings: UserSettings):
         [{"text": "🔙 بازگشت", "callback_data": "back_main"}]
     ]}
 
-# ═══════════════════════ Playwright – global (فقط برای Workerهای عمومی) ═══════════════════════
+# ═══════════════════════ Playwright – global (فقط عمومی) ═══════════════════════
 _global_playwright = None
 _global_browser = None
 browser_contexts = {}
@@ -397,11 +398,11 @@ BLOCKED_AD_KEYWORDS = [
 ]
 
 def get_or_create_context(chat_id, incognito=False):
-    """ایجاد Context عمومی (یا ناشناس)"""
     global _global_playwright, _global_browser
     ctx_key = f"{chat_id}{'_incognito' if incognito else ''}"
     with browser_contexts_lock:
         existing = browser_contexts.get(ctx_key)
+        # در حالت ناشناس همیشه context جدید بسازیم (کش نشود)
         if existing and time.time() - existing["last_used"] < 600 and not incognito:
             existing["last_used"] = time.time()
             return existing["context"]
@@ -425,6 +426,8 @@ def get_or_create_context(chat_id, incognito=False):
         context = _global_browser.new_context(viewport={"width": vw, "height": vh})
         if incognito:
             context.clear_cookies()
+            # تنظیمات اضافه برای ناشناس
+            context.set_extra_http_headers({"DNT": "1"})
         def handle_popup(page):
             try:
                 url = page.url.lower()
@@ -449,7 +452,7 @@ def close_user_context(chat_id, incognito=False):
         except: pass
 
 # ═══════════════════════ ابزارهای صوتی (متد snd-aloop) ═══════════════════════
-def has_audio_support() -> bool:
+def has_audio_support():
     return shutil.which("ffmpeg") is not None
 
 def setup_audio_loop():
@@ -458,21 +461,14 @@ def setup_audio_loop():
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
         safe_print("snd-aloop loaded")
     except:
-        safe_print("snd-aloop not available, trying pulseaudio")
         subprocess.run(["pulseaudio", "--start"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-def start_audio_capture_method4(job_dir: str) -> Tuple[Optional[subprocess.Popen], str]:
+def start_audio_capture_method4(job_dir):
     audio_path = os.path.join(job_dir, "audio.mp3")
-    if not shutil.which("ffmpeg"):
-        return None, audio_path
+    if not shutil.which("ffmpeg"): return None, audio_path
     setup_audio_loop()
-    cmd = [
-        'ffmpeg', '-y',
-        '-f', 'alsa', '-i', 'hw:1,0',
-        '-ac', '2', '-ar', '44100',
-        '-acodec', 'libmp3lame', '-b:a', '128k',
-        audio_path
-    ]
+    cmd = ['ffmpeg', '-y', '-f', 'alsa', '-i', 'hw:1,0', '-ac', '2', '-ar', '44100',
+           '-acodec', 'libmp3lame', '-b:a', '128k', audio_path]
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         safe_print("audio capture (snd-aloop) started")
@@ -481,14 +477,13 @@ def start_audio_capture_method4(job_dir: str) -> Tuple[Optional[subprocess.Popen
         safe_print(f"audio capture failed: {e}")
         return None, audio_path
 
-def stop_audio_capture(proc: Optional[subprocess.Popen], audio_path: str) -> bool:
+def stop_audio_capture(proc, audio_path):
     if not proc: return False
     try:
         proc.terminate()
         proc.wait(timeout=5)
         return os.path.exists(audio_path) and os.path.getsize(audio_path) > 0
     except: return False
-
 # ═══════════════════════ استخراج المان‌ها (سه حالته) ═══════════════════════
 def extract_clickable_and_media(page, mode="text"):
     if mode == "text":
@@ -873,7 +868,6 @@ def _finish_website_download(job, job_dir):
     for idx, p in enumerate(parts, 1): send_document(chat_id, p, caption=f"🌐 پارت {idx}/{len(parts)}")
     job.status = "done"; update_job(job)
     shutil.rmtree(job_dir, ignore_errors=True)
-
 # ═══════════════════════ صف و Worker (عمومی + ضبط) ═══════════════════════
 QUEUE_FILE = "queue.json"
 def load_queue():
@@ -901,11 +895,17 @@ def pop_queued():
                 save_queue(q)
                 return job
     return None
+
+# ★ find_job یکپارچه (هم صف عمومی و هم صف ضبط را می‌گردد)
 def find_job(jid):
     for item in load_queue():
         if item["job_id"] == jid: return Job(**item)
+    for item in load_record_queue():
+        if item["job_id"] == jid: return Job(**item)
     return None
+
 def update_job(job):
+    # ابتدا در صف عمومی جستجو کن
     with queue_lock:
         q = load_queue()
         for i, item in enumerate(q):
@@ -915,6 +915,17 @@ def update_job(job):
                 return
         q.append(asdict(job))
         save_queue(q)
+    # سپس در صف ضبط
+    with record_queue_lock:
+        rq = load_record_queue()
+        for i, item in enumerate(rq):
+            if item["job_id"] == job.job_id:
+                rq[i] = asdict(job)
+                save_record_queue(rq)
+                return
+        rq.append(asdict(job))
+        save_record_queue(rq)
+
 def job_queue_position(jid):
     q = load_queue()
     pos = 1
@@ -926,8 +937,9 @@ def job_queue_position(jid):
 
 def count_user_jobs(chat_id: int) -> int:
     q = load_queue()
+    rq = load_record_queue()
     count = 0
-    for item in q:
+    for item in q + rq:
         if item["chat_id"] == chat_id and item["status"] in ("queued", "running"):
             count += 1
     return count
@@ -940,6 +952,13 @@ def kill_all_user_jobs(chat_id: int):
                 item["status"] = "cancelled"
                 item["updated_at"] = time.time()
         save_queue(q)
+    with record_queue_lock:
+        rq = load_record_queue()
+        for item in rq:
+            if item["chat_id"] == chat_id and item["status"] in ("queued", "running"):
+                item["status"] = "cancelled"
+                item["updated_at"] = time.time()
+        save_record_queue(rq)
 
 WORKERS_FILE = "workers.json"
 def load_workers():
@@ -1151,7 +1170,12 @@ def process_job(worker_id, job):
             if s.state != "browsing":
                 s.state = "idle"; s.current_job_id = None; s.cancel_requested = False
                 set_session(s)
-                send_message(chat_id, "🔄 آماده.", reply_markup=main_menu_keyboard(s.is_admin, s.subscription))
+                # منوی اصلی را ویرایش کن (اگر شناسه موجود باشد)
+                if s.main_menu_msg_id:
+                    edit_message_reply_markup(chat_id, s.main_menu_msg_id,
+                                              main_menu_keyboard(s.is_admin, s.subscription))
+                else:
+                    send_message(chat_id, "🔄 آماده.", reply_markup=main_menu_keyboard(s.is_admin, s.subscription))
 
 # ═══════════════════════ دانلود هوشمند ═══════════════════════
 def handle_download(job, job_dir):
@@ -1293,7 +1317,7 @@ def handle_blind_download(job):
         job.status = "error"; update_job(job)
         shutil.rmtree(job_dir, ignore_errors=True)
 
-# ═══════════════════════ ضبط ویدیو (مرورگر اختصاصی برای Thread Safety) ═══════════════════════
+# ═══════════════════════ ضبط ویدیو (مرورگر اختصاصی + ارسال تضمینی) ═══════════════════════
 def handle_record_video(job):
     chat_id = job.chat_id; session = get_session(chat_id)
     url = job.url; rec_time = session.settings.record_time
@@ -1354,10 +1378,13 @@ def handle_record_video(job):
 
             page.wait_for_timeout(rec_time * 1000)
         finally:
-            page.close(); context.close()
+            page.close()
+            context.close()  # ★ حتماً context بسته شود تا فایل webm ذخیره گردد
 
         audio_ok = stop_audio_capture(audio_proc, audio_path) if audio_proc else False
 
+        # ★ یافتن فایل webm
+        time.sleep(0.5)  # اندکی صبر برای flush دیسک
         webm = None
         for f in os.listdir(job_dir):
             if f.endswith('.webm'): webm = os.path.join(job_dir, f); break
@@ -1378,6 +1405,7 @@ def handle_record_video(job):
             except:
                 safe_print("Video format conversion failed, keeping webm")
 
+        # ★ ذخیره مسیرها در job.extra
         job.extra = {
             "video_path": final_video_path,
             "audio_path": audio_path if (audio_ok and os.path.exists(audio_path)) else None,
@@ -1385,6 +1413,7 @@ def handle_record_video(job):
             "audio_done": not (audio_ok and os.path.exists(audio_path))
         }
 
+        # پرسش از کاربر: ZIP یا اصلی
         kb_rows = [
             [{"text": "📦 ویدیو ZIP", "callback_data": f"rec_vidzip_{job.job_id}"},
              {"text": "📄 ویدیو اصلی", "callback_data": f"rec_vidraw_{job.job_id}"}]
@@ -1405,13 +1434,13 @@ def handle_record_video(job):
         job.status = "error"; update_job(job)
         shutil.rmtree(job_dir, ignore_errors=True)
     finally:
+        # ★ حتماً مرورگر اختصاصی بسته شود
         if _rec_browser:
             try: _rec_browser.close()
             except: pass
         if _rec_pw:
             try: _rec_pw.stop()
             except: pass
-
 # ═══════════════════════ تشخیص موقعیت ویدیو ═══════════════════════
 def find_video_center(page):
     coords = page.evaluate("""() => {
@@ -1527,8 +1556,23 @@ def send_browser_page(chat_id, image_path=None, url="", page_num=0):
     keyboard_rows.append([{"text": "❌ بستن", "callback_data": f"closebrowser_{chat_id}"}])
 
     kb = {"inline_keyboard": keyboard_rows}
-    if image_path: send_document(chat_id, image_path, caption=f"🌐 {url}")
-    send_message(chat_id, f"صفحه {page_num+1}/{math.ceil(len(all_links)/per_page)}", reply_markup=kb)
+    if image_path:
+        send_document(chat_id, image_path, caption=f"🌐 {url}")
+
+    # ویرایش پیام قبلی یا ارسال جدید
+    if session.browser_page_msg_id:
+        # سعی کن متن رو ویرایش کنی، اگر ناموفق بود پیام جدید بده
+        result = edit_message_text(chat_id, session.browser_page_msg_id,
+                                   f"صفحه {page_num+1}/{math.ceil(len(all_links)/per_page)}",
+                                   reply_markup=kb)
+        if not result:
+            msg = send_message(chat_id, f"صفحه {page_num+1}/{math.ceil(len(all_links)/per_page)}", reply_markup=kb)
+            if msg and "message_id" in msg: session.browser_page_msg_id = msg["message_id"]
+    else:
+        msg = send_message(chat_id, f"صفحه {page_num+1}/{math.ceil(len(all_links)/per_page)}", reply_markup=kb)
+        if msg and "message_id" in msg: session.browser_page_msg_id = msg["message_id"]
+
+    set_session(session)
 
     extra = all_links[end:]
     if extra:
@@ -1795,12 +1839,12 @@ def admin_panel(chat_id):
         ]}
         send_message(chat_id, msg, reply_markup=kb)
     except Exception as e: send_message(chat_id, f"❌ خطا در دریافت اطلاعات: {e}")
-
-# ═══════════════════════ مدیریت پیام و Callback (با ویرایش پیام) ═══════════════════════
+# ═══════════════════════ مدیریت پیام و Callback (پالایش‌شده) ═══════════════════════
 def handle_message(chat_id, text):
     session = get_session(chat_id)
     text = text.strip()
 
+    # 💀 دستور /kill – اولویت مطلق
     if text == "/kill":
         if not session.is_pro and not session.is_admin:
             send_message(chat_id, "⛔ دسترسی غیرمجاز.")
@@ -1817,34 +1861,39 @@ def handle_message(chat_id, text):
         session.state = "idle"
         session.click_counter = 0
         set_session(session)
-        send_message(chat_id, "💀 تمام فعالیت‌ها متوقف و وضعیت به روز اول برگردانده شد.",
-                     reply_markup=main_menu_keyboard(session.is_admin, session.subscription))
+        send_message(chat_id, "💀 تمام فعالیت‌ها متوقف و وضعیت به روز اول برگردانده شد.")
+        # نمایش منوی اصلی تازه
+        show_main_menu(chat_id, session)
         return
 
+    # 🛑 بررسی خاموشی نرم (Soft Shutdown)
     if is_service_disabled() and not session.is_admin:
         if text == "/start":
             session.state = "idle"; session.click_counter = 0; set_session(session)
-            send_message(chat_id, "⛔ سرویس در حال حاضر غیرفعال است. لطفاً بعداً تلاش کنید.",
-                         reply_markup=main_menu_keyboard(session.is_admin, session.subscription))
+            send_message(chat_id, "⛔ سرویس در حال حاضر غیرفعال است. لطفاً بعداً تلاش کنید.")
+            show_main_menu(chat_id, session)
             return
         if text == "/cancel":
             session.state = "idle"; session.cancel_requested = True; session.current_job_id = None
             session.click_counter = 0; set_session(session)
             close_user_context(chat_id)
-            send_message(chat_id, "⏹️ لغو شد.", reply_markup=main_menu_keyboard(session.is_admin, session.subscription))
+            send_message(chat_id, "⏹️ لغو شد.")
+            show_main_menu(chat_id, session)
             return
         if not session.is_pro and not session.is_admin:
             sub = activate_subscription(chat_id, text)
             if sub:
                 send_message(chat_id, f"✅ اشتراک **{sub.upper()}** فعال شد!")
+                show_main_menu(chat_id, session)
             else:
                 send_message(chat_id, "⛔ کد نامعتبر یا سرویس غیرفعال است.")
             return
         if session.is_pro or session.is_admin:
-            send_message(chat_id, "⛔ سرویس موقتاً غیرفعال است.",
-                         reply_markup=main_menu_keyboard(session.is_admin, session.subscription))
+            send_message(chat_id, "⛔ سرویس موقتاً غیرفعال است.")
+            show_main_menu(chat_id, session)
         return
 
+    # 👑 دستورات ادمین
     if session.is_admin:
         if text.startswith("/addcode "):
             parts = text.split()
@@ -1873,12 +1922,13 @@ def handle_message(chat_id, text):
             send_message(chat_id, f"🔄 وضعیت سرویس: **{status}**")
             return
 
+    # ⏱️ دستور /status
     if text == "/status":
         if not session.is_pro and not session.is_admin:
             send_message(chat_id, "⛔ دسترسی غیرمجاز.")
             return
         running_job = None
-        for item in load_queue():
+        for item in load_queue() + load_record_queue():
             if item["chat_id"] == chat_id and item["status"] == "running":
                 running_job = Job(**item)
                 break
@@ -1889,8 +1939,7 @@ def handle_message(chat_id, text):
         estimates = {"screenshot": 30, "download": 60, "scan": 120, "record": 180}
         est = 60
         for key, val in estimates.items():
-            if key in running_job.mode:
-                est = val; break
+            if key in running_job.mode: est = val; break
         remaining = max(0, est - elapsed)
         msg = (f"⏱️ **وضعیت فرایند**\n\n"
                f"📌 شناسه: `{running_job.job_id[:8]}`\n"
@@ -1904,7 +1953,7 @@ def handle_message(chat_id, text):
     if text == "/start":
         session.state = "idle"; session.click_counter = 0; set_session(session)
         if session.is_admin or session.is_pro:
-            send_message(chat_id, "منوی اصلی:", reply_markup=main_menu_keyboard(session.is_admin, session.subscription))
+            show_main_menu(chat_id, session)
         else:
             send_message(chat_id, "👋 کد اشتراک خود را وارد کنید:")
         return
@@ -1913,18 +1962,21 @@ def handle_message(chat_id, text):
         session.state = "idle"; session.cancel_requested = True; session.current_job_id = None
         session.click_counter = 0; set_session(session)
         close_user_context(chat_id)
-        send_message(chat_id, "⏹️ لغو شد.", reply_markup=main_menu_keyboard(session.is_admin, session.subscription))
+        send_message(chat_id, "⏹️ لغو شد.")
+        show_main_menu(chat_id, session)
         return
 
     if not session.is_pro and not session.is_admin:
         sub = activate_subscription(chat_id, text)
         if sub:
-            send_message(chat_id, f"✅ اشتراک **{sub.upper()}** فعال شد!",
-                         reply_markup=main_menu_keyboard(session.is_admin, sub))
+            session.subscription = sub; session.is_pro = True; set_session(session)
+            send_message(chat_id, f"✅ اشتراک **{sub.upper()}** فعال شد!")
+            show_main_menu(chat_id, session)
         else:
             send_message(chat_id, "⛔ کد نامعتبر")
         return
 
+    # 📋 حالت browsing: قبول دستورهای /a، /o، /d، /H و /Live_
     if session.state == "browsing":
         if session.text_links and text in session.text_links:
             url = session.text_links.pop(text)
@@ -1939,6 +1991,7 @@ def handle_message(chat_id, text):
                 enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="browser", url=url))
         return
 
+    # 🎭 حالت انتظار Live Command
     if session.state == "waiting_live_command":
         if text.startswith("/Live_"):
             parts = text[6:]
@@ -1959,6 +2012,7 @@ def handle_message(chat_id, text):
             send_message(chat_id, "❌ لطفاً یک دستور Live معتبر ارسال کنید (مثال: /Live_d6h7s).")
         return
 
+    # حالت انتظار عدد برای زمان ضبط
     if session.state == "waiting_record_time":
         try:
             val = int(text)
@@ -1967,15 +2021,14 @@ def handle_message(chat_id, text):
                 session.state = "idle"
                 set_session(session)
                 send_message(chat_id, f"⏱️ زمان ضبط روی {val} ثانیه تنظیم شد.")
-                if session.last_settings_msg_id:
-                    edit_message_reply_markup(chat_id, session.last_settings_msg_id,
-                                              settings_keyboard(session.settings))
+                refresh_settings_message(chat_id, session)
             else:
                 send_message(chat_id, "❌ لطفاً عددی بین ۱ تا ۱۸۰۰ وارد کنید.")
         except:
             send_message(chat_id, "❌ لطفاً یک عدد معتبر بین ۱ تا ۱۸۰۰ وارد کنید.")
         return
 
+    # حالت‌های انتظار URL
     if session.state.startswith("waiting_url_"):
         url = text
         if not (url.startswith("http://") or url.startswith("https://")):
@@ -1997,10 +2050,13 @@ def handle_message(chat_id, text):
             enqueue(job)
         session.state = "idle"; session.current_job_id = job.job_id
         set_session(session)
+        # حذف prompt قبلی
+        delete_prompt(chat_id, session)
         send_message(chat_id, "✅ در صف قرار گرفت.")
         return
 
-    send_message(chat_id, "از منو استفاده کنید:", reply_markup=main_menu_keyboard(session.is_admin, session.subscription))
+    # پیش‌فرض
+    show_main_menu(chat_id, session)
 
 def handle_live_command(chat_id, text, url, need_scroll=False):
     session = get_session(chat_id)
@@ -2054,9 +2110,9 @@ def handle_callback(cq):
             session.state = "idle"; session.cancel_requested = True; session.current_job_id = None
             session.click_counter = 0; set_session(session)
             close_user_context(chat_id)
-            send_message(chat_id, "✅ لغو شد.", reply_markup=main_menu_keyboard(session.is_admin, session.subscription))
+            show_main_menu(chat_id, session)
         elif data == "back_main":
-            send_message(chat_id, "منوی اصلی:", reply_markup=main_menu_keyboard(session.is_admin, session.subscription))
+            show_main_menu(chat_id, session)
         return
 
     if not session.is_admin:
@@ -2066,20 +2122,21 @@ def handle_callback(cq):
         session.click_counter += 1
         set_session(session)
 
+    # منوی اصلی
     if data == "menu_screenshot":
-        session.state = "waiting_url_screenshot"; set_session(session); send_message(chat_id, "📸 URL:")
+        session.state = "waiting_url_screenshot"; set_session(session)
+        send_prompt(chat_id, session, "📸 URL:")
     elif data == "menu_download":
-        session.state = "waiting_url_download"; set_session(session); send_message(chat_id, "📥 URL:")
+        session.state = "waiting_url_download"; set_session(session)
+        send_prompt(chat_id, session, "📥 URL:")
     elif data == "menu_browser":
-        session.state = "waiting_url_browser"; set_session(session); send_message(chat_id, "🧭 URL:")
+        session.state = "waiting_url_browser"; set_session(session)
+        send_prompt(chat_id, session, "🧭 URL:")
     elif data == "menu_record":
         session.state = "waiting_url_record"; set_session(session)
-        send_message(chat_id, "🎬 لینک ویدیو برای ضبط را بفرستید:")
+        send_prompt(chat_id, session, "🎬 لینک ویدیو برای ضبط را بفرستید:")
     elif data == "menu_settings":
-        result = send_message(chat_id, "⚙️ تنظیمات:", reply_markup=settings_keyboard(session.settings))
-        if result and "message_id" in result:
-            session.last_settings_msg_id = result["message_id"]
-            set_session(session)
+        show_settings(chat_id, session)
     elif data == "menu_admin":
         if session.is_admin: admin_panel(chat_id)
         else: answer_callback_query(cid, "دسترسی غیرمجاز")
@@ -2087,7 +2144,7 @@ def handle_callback(cq):
         session.state = "idle"; session.cancel_requested = True; session.current_job_id = None
         session.click_counter = 0; set_session(session)
         close_user_context(chat_id)
-        send_message(chat_id, "✅ لغو شد.", reply_markup=main_menu_keyboard(session.is_admin, session.subscription))
+        show_main_menu(chat_id, session)
     elif data == "admin_toggleservice":
         if session.is_admin:
             disabled = toggle_service()
@@ -2096,14 +2153,16 @@ def handle_callback(cq):
             admin_panel(chat_id)
         else: answer_callback_query(cid, "دسترسی غیرمجاز")
 
+    # تنظیمات
     elif data == "set_rec":
         session.state = "waiting_record_time"; set_session(session)
-        send_message(chat_id, "⏱️ زمان ضبط را به ثانیه وارد کنید (۱ تا ۱۸۰۰):")
+        send_prompt(chat_id, session, "⏱️ زمان ضبط را به ثانیه وارد کنید (۱ تا ۱۸۰۰):")
     elif data in ("set_dlmode", "set_brwmode", "set_deep", "set_recbeh", "set_audio", "set_vfmt", "set_incognito"):
         _settings_toggle(chat_id, session, data, cid)
     elif data == "back_main":
-        send_message(chat_id, "منوی اصلی:", reply_markup=main_menu_keyboard(session.is_admin, session.subscription))
+        show_main_menu(chat_id, session)
 
+    # اسکرین‌شات‌های چندمرحله‌ای
     elif data.startswith("req2x_"):
         jid = data[6:]; job = find_job(jid)
         if job and job.status == "done":
@@ -2113,6 +2172,7 @@ def handle_callback(cq):
         if job and job.status == "done":
             enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="4k_screenshot", url=job.url))
 
+    # دانلود ZIP/اصلی
     elif data.startswith("dlzip_") or data.startswith("dlraw_"):
         jid = data[6:] if data.startswith("dlzip_") else data[6:]; job = find_job(jid)
         if job and job.extra:
@@ -2124,6 +2184,7 @@ def handle_callback(cq):
             job.extra["pack_zip"] = data.startswith("dlblindzip_"); job.status = "done"; update_job(job)
             enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="download_execute", url=job.url, extra=job.extra))
 
+    # دریافت ویدیو/صوت ضبط‌شده
     elif data.startswith("rec_vidzip_") or data.startswith("rec_vidraw_"):
         jid = data[10:] if data.startswith("rec_vidzip_") else data[10:]
         job = find_job(jid)
@@ -2144,8 +2205,10 @@ def handle_callback(cq):
     elif data.startswith("canceljob_"):
         jid = data[10:]; job = find_job(jid)
         if job: job.status = "cancelled"; update_job(job)
-        send_message(chat_id, "❌ لغو شد.", reply_markup=main_menu_keyboard(session.is_admin, session.subscription))
+        send_message(chat_id, "❌ لغو شد.")
+        show_main_menu(chat_id, session)
 
+    # ناوبری مرورگر
     elif data.startswith("nav_"):
         parts = data.split("_", 2)
         if len(parts) >= 3:
@@ -2165,13 +2228,14 @@ def handle_callback(cq):
                     enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="download", url=url))
                 else: answer_callback_query(cid, "🛑 صف پر است.")
 
+    # اسکن / جستجو / استخراج / تحلیل
     elif data.startswith("scvid_"): enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="scan_videos", url=""))
     elif data.startswith("scdl_"): enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="scan_downloads", url=""))
     elif data.startswith("extcmd_"): enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="extract_commands", url=""))
-
     elif data.startswith("sman_"): enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="smart_analyze", url=""))
     elif data.startswith("srcan_"): enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="source_analyze", url=""))
 
+    # ضبط ویدیو
     elif data.startswith("recvid_"):
         if session.settings.record_behavior == "live":
             session.state = "waiting_live_command"; set_session(session)
@@ -2181,12 +2245,14 @@ def handle_callback(cq):
                 enqueue_record(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="record_video", url=session.browser_url))
             else: answer_callback_query(cid, "🛑 صف پر است.")
 
+    # دانلود سایت
     elif data.startswith("dlweb_"):
         if session.browser_url:
             if session.is_admin or count_user_jobs(chat_id) < 2:
                 enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="download_website", url=session.browser_url))
             else: answer_callback_query(cid, "🛑 صف پر است.")
 
+    # صفحه‌بندی
     elif data.startswith("bpg_"):
         parts = data.split("_")
         if len(parts) == 3:
@@ -2199,17 +2265,18 @@ def handle_callback(cq):
             send_found_downloads_page(chat_id, page)
     elif data == "close_downloads":
         session.found_downloads = None; session.found_downloads_page = 0; set_session(session)
-        send_message(chat_id, "📦 نتایج جستجو بسته شد.", reply_markup=main_menu_keyboard(session.is_admin, session.subscription))
+        show_main_menu(chat_id, session)
 
+    # دانلود همه
     elif data.startswith("dlall_"):
         enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="download_all_found", url=""))
 
+    # مسدودساز تبلیغات
     elif data.startswith("adblock_"):
         parsed_url = urlparse(session.browser_url or "")
         current_domain = parsed_url.netloc.lower()
         if not current_domain:
-            answer_callback_query(cid, "دامنه‌ای برای مسدودسازی شناسایی نشد.")
-            return
+            answer_callback_query(cid, "دامنه‌ای برای مسدودسازی شناسایی نشد."); return
         if session.ad_blocked_domains is None: session.ad_blocked_domains = []
         if current_domain in session.ad_blocked_domains:
             session.ad_blocked_domains.remove(current_domain)
@@ -2220,12 +2287,65 @@ def handle_callback(cq):
         set_session(session)
         send_browser_page(chat_id, page_num=session.browser_page)
 
+    # بستن مرورگر
     elif data.startswith("closebrowser_"):
         close_user_context(chat_id); session.state = "idle"; session.click_counter = 0; set_session(session)
-        send_message(chat_id, "🧭 بسته شد.", reply_markup=main_menu_keyboard(session.is_admin, session.subscription))
+        show_main_menu(chat_id, session)
 
     else:
         answer_callback_query(cid)
+
+# ═══════════════════════ توابع کمکی نمایش ═══════════════════════
+def show_main_menu(chat_id, session):
+    """نمایش یا ویرایش منوی اصلی"""
+    kb = main_menu_keyboard(session.is_admin, session.subscription)
+    if session.main_menu_msg_id:
+        # ویرایش پیام قبلی
+        edit_message_reply_markup(chat_id, session.main_menu_msg_id, kb)
+    else:
+        result = send_message(chat_id, "منوی اصلی:", reply_markup=kb)
+        if result and "message_id" in result:
+            session.main_menu_msg_id = result["message_id"]
+            set_session(session)
+
+def show_settings(chat_id, session):
+    """نمایش تنظیمات (جایگزین منوی اصلی)"""
+    kb = settings_keyboard(session.settings)
+    if session.settings_msg_id:
+        # سعی در ویرایش پیام قبلی تنظیمات
+        if not edit_message_reply_markup(chat_id, session.settings_msg_id, kb):
+            # اگر ناموفق بود، پیام جدید
+            result = send_message(chat_id, "⚙️ تنظیمات:", reply_markup=kb)
+            if result and "message_id" in result:
+                session.settings_msg_id = result["message_id"]
+                set_session(session)
+    else:
+        result = send_message(chat_id, "⚙️ تنظیمات:", reply_markup=kb)
+        if result and "message_id" in result:
+            session.settings_msg_id = result["message_id"]
+            set_session(session)
+
+def refresh_settings_message(chat_id, session):
+    """بروزرسانی کیبورد تنظیمات بدون تغییر متن"""
+    if session.settings_msg_id:
+        edit_message_reply_markup(chat_id, session.settings_msg_id, settings_keyboard(session.settings))
+    else:
+        show_settings(chat_id, session)
+
+def send_prompt(chat_id, session, text):
+    """ارسال prompt و حذف قبلی"""
+    delete_prompt(chat_id, session)
+    result = send_message(chat_id, text)
+    if result and "message_id" in result:
+        session.prompt_msg_id = result["message_id"]
+        set_session(session)
+
+def delete_prompt(chat_id, session):
+    """حذف prompt در صورت وجود"""
+    if session.prompt_msg_id:
+        delete_message(chat_id, session.prompt_msg_id)
+        session.prompt_msg_id = None
+        set_session(session)
 
 def _settings_toggle(chat_id, session, data, cid):
     if data == "set_dlmode":
@@ -2253,10 +2373,7 @@ def _settings_toggle(chat_id, session, data, cid):
         session.settings.incognito_mode = not session.settings.incognito_mode
     set_session(session)
     answer_callback_query(cid, "✅ تنظیم شد.")
-    if session.last_settings_msg_id:
-        edit_message_reply_markup(chat_id, session.last_settings_msg_id, settings_keyboard(session.settings))
-    else:
-        send_message(chat_id, "⚙️ تنظیمات:", reply_markup=settings_keyboard(session.settings))
+    refresh_settings_message(chat_id, session)
 
 def _send_recorded_file(chat_id, job, file_type, zip_mode):
     path = job.extra.get("video_path") if file_type == "video" else job.extra.get("audio_path")
@@ -2311,7 +2428,7 @@ def main():
         threading.Thread(target=worker_loop, args=(i, stop_event, "general"), daemon=True).start()
     threading.Thread(target=worker_loop, args=(2, stop_event, "record"), daemon=True).start()
     threading.Thread(target=polling_loop, args=(stop_event,), daemon=True).start()
-    safe_print("✅ Bot20 Ultimate Pro (Thread-safe) اجرا شد")
+    safe_print("✅ Bot21 Polished اجرا شد")
     try:
         while True: time.sleep(1)
     except KeyboardInterrupt: stop_event.set()
