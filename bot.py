@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ربات بله – نسخهٔ ۲۰ (Ultimate Pro)
+ربات بله – نسخهٔ ۲۰ (Ultimate Pro) — با رفع Thread
 مرورگر سه حالته + حالت ناشناس، ضبط ویدیو با صدا (snd-aloop)،
 انتخاب فرمت خروجی (MKV/MP4/WebM)، دو Context (عمومی و ضبط)،
-ویرایش پیام‌ها به‌جای ارسال جدید، تماشاگر مخفی (همان ضبط)،
+ویرایش پیام‌ها به‌جای ارسال جدید،
 اسکن ویدیو/فایل، دانلودر هوشمند، ۳ Worker با صف مجزا برای ضبط.
 """
 
@@ -308,13 +308,11 @@ def send_message(chat_id, text, reply_markup=None):
     return bale_request("sendMessage", params=params)
 
 def edit_message_text(chat_id, message_id, text, reply_markup=None):
-    """ویرایش متن یک پیام موجود"""
     params = {"chat_id": chat_id, "message_id": message_id, "text": text}
     if reply_markup: params["reply_markup"] = json.dumps(reply_markup)
     return bale_request("editMessageText", params=params)
 
 def edit_message_reply_markup(chat_id, message_id, reply_markup):
-    """ویرایش کیبورد یک پیام موجود"""
     params = {"chat_id": chat_id, "message_id": message_id,
               "reply_markup": json.dumps(reply_markup)}
     return bale_request("editMessageReplyMarkup", params=params)
@@ -369,7 +367,7 @@ def settings_keyboard(settings: UserSettings):
         [{"text": "🔙 بازگشت", "callback_data": "back_main"}]
     ]}
 
-# ═══════════════════════ Playwright – global ═══════════════════════
+# ═══════════════════════ Playwright – global (فقط برای Workerهای عمومی) ═══════════════════════
 _global_playwright = None
 _global_browser = None
 browser_contexts = {}
@@ -426,7 +424,6 @@ def get_or_create_context(chat_id, incognito=False):
         vh = random.choice([915, 844, 896])
         context = _global_browser.new_context(viewport={"width": vw, "height": vh})
         if incognito:
-            # ناشناس: حذف تمام داده‌های ذخیره‌شده
             context.clear_cookies()
         def handle_popup(page):
             try:
@@ -453,11 +450,9 @@ def close_user_context(chat_id, incognito=False):
 
 # ═══════════════════════ ابزارهای صوتی (متد snd-aloop) ═══════════════════════
 def has_audio_support() -> bool:
-    """بررسی وجود ماژول snd-aloop"""
-    return shutil.which("ffmpeg") is not None and os.path.exists("/dev/snd/controlC1") is False
+    return shutil.which("ffmpeg") is not None
 
 def setup_audio_loop():
-    """راه‌اندازی کارت صدای مجازی snd-aloop (اگر موجود نباشد)"""
     try:
         subprocess.run(["sudo", "modprobe", "snd-aloop"], check=True,
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
@@ -467,15 +462,13 @@ def setup_audio_loop():
         subprocess.run(["pulseaudio", "--start"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 def start_audio_capture_method4(job_dir: str) -> Tuple[Optional[subprocess.Popen], str]:
-    """ضبط صدا از hw:1,0 (snd-aloop) با ffmpeg"""
     audio_path = os.path.join(job_dir, "audio.mp3")
     if not shutil.which("ffmpeg"):
         return None, audio_path
     setup_audio_loop()
-    # تلاش برای ضبط از snd-aloop
     cmd = [
         'ffmpeg', '-y',
-        '-f', 'alsa', '-i', 'hw:1,0',   # کارت صدای مجازی
+        '-f', 'alsa', '-i', 'hw:1,0',
         '-ac', '2', '-ar', '44100',
         '-acodec', 'libmp3lame', '-b:a', '128k',
         audio_path
@@ -495,6 +488,7 @@ def stop_audio_capture(proc: Optional[subprocess.Popen], audio_path: str) -> boo
         proc.wait(timeout=5)
         return os.path.exists(audio_path) and os.path.getsize(audio_path) > 0
     except: return False
+
 # ═══════════════════════ استخراج المان‌ها (سه حالته) ═══════════════════════
 def extract_clickable_and_media(page, mode="text"):
     if mode == "text":
@@ -754,7 +748,6 @@ def crawl_for_download_link(start_url, max_depth=1, max_pages=10, timeout_second
     return None
 
 def split_file_binary(file_path, prefix, ext):
-    """تقسیم فایل با ffmpeg برای ویدیوها (قابل پخش مستقل)"""
     d = os.path.dirname(file_path) or "."
     parts = []
     if not os.path.exists(file_path): return []
@@ -880,6 +873,7 @@ def _finish_website_download(job, job_dir):
     for idx, p in enumerate(parts, 1): send_document(chat_id, p, caption=f"🌐 پارت {idx}/{len(parts)}")
     job.status = "done"; update_job(job)
     shutil.rmtree(job_dir, ignore_errors=True)
+
 # ═══════════════════════ صف و Worker (عمومی + ضبط) ═══════════════════════
 QUEUE_FILE = "queue.json"
 def load_queue():
@@ -1010,7 +1004,6 @@ def worker_loop(worker_id, stop_event, worker_type="general"):
     safe_print(f"[Worker {worker_id} ({worker_type})] start")
     while not stop_event.is_set():
         if worker_type == "record":
-            # فقط jobهای ضبط را از صف مجزا برمی‌دارد
             if find_idle_worker("record") and find_idle_worker("record").worker_id == worker_id:
                 job = pop_record_queued()
                 if not job: time.sleep(2); continue
@@ -1030,14 +1023,10 @@ def worker_loop(worker_id, stop_event, worker_type="general"):
             else: time.sleep(2)
 
 def process_record_job(worker_id, job):
-    """پردازش job ضبط ویدیو (با صدا و انتخاب فرمت)"""
     chat_id = job.chat_id
-    session = get_session(chat_id)
-    
     if job.mode == "record_video":
         handle_record_video(job)
     else:
-        # fallback
         job.status = "error"; update_job(job)
 
 # ═══════════════════════ هستهٔ پردازش Job (عمومی) ═══════════════════════
@@ -1064,7 +1053,6 @@ def process_job(worker_id, job):
     if job.mode == "blind_download":
         handle_blind_download(job)
         return
-    # record_video توسط worker ضبط انجام می‌شود، اینجا نیست
     if job.mode == "scan_videos":
         if not session.is_admin:
             err = check_rate_limit(chat_id, "scan_videos")
@@ -1305,13 +1293,13 @@ def handle_blind_download(job):
         job.status = "error"; update_job(job)
         shutil.rmtree(job_dir, ignore_errors=True)
 
-# ═══════════════════════ ضبط ویدیو (با صدا، انتخاب فرمت، و درخواست ZIP/اصلی) ═══════════════════════
+# ═══════════════════════ ضبط ویدیو (مرورگر اختصاصی برای Thread Safety) ═══════════════════════
 def handle_record_video(job):
     chat_id = job.chat_id; session = get_session(chat_id)
     url = job.url; rec_time = session.settings.record_time
     behavior = session.settings.record_behavior
     audio_enabled = session.settings.audio_enabled
-    video_format = session.settings.video_format  # "webm", "mkv", "mp4"
+    video_format = session.settings.video_format
     job_dir = os.path.join("jobs_data", job.job_id)
     os.makedirs(job_dir, exist_ok=True)
 
@@ -1319,11 +1307,23 @@ def handle_record_video(job):
     send_message(chat_id, f"🎬 ضبط {rec_time} ثانیه ({behavior_names.get(behavior, behavior)})...")
 
     audio_proc = None; audio_path = None
+    _rec_pw = None; _rec_browser = None
     try:
         if audio_enabled:
             audio_proc, audio_path = start_audio_capture_method4(job_dir)
 
-        context = _global_browser.new_context(
+        # ★ مرورگر اختصاصی برای این Worker (حل مشکل Thread)
+        _rec_pw = sync_playwright().start()
+        _rec_browser = _rec_pw.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox", "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage", "--disable-gpu",
+                "--disable-blink-features=AutomationControlled",
+                "--autoplay-policy=no-user-gesture-required",
+            ]
+        )
+        context = _rec_browser.new_context(
             viewport={"width": 1280, "height": 720},
             record_video_dir=job_dir,
             record_video_size={"width": 1280, "height": 720}
@@ -1356,10 +1356,8 @@ def handle_record_video(job):
         finally:
             page.close(); context.close()
 
-        # توقف ضبط صدا
         audio_ok = stop_audio_capture(audio_proc, audio_path) if audio_proc else False
 
-        # پیدا کردن فایل webm
         webm = None
         for f in os.listdir(job_dir):
             if f.endswith('.webm'): webm = os.path.join(job_dir, f); break
@@ -1367,7 +1365,6 @@ def handle_record_video(job):
             send_message(chat_id, "❌ ویدیویی ضبط نشد.")
             job.status = "error"; update_job(job); return
 
-        # تبدیل فرمت اگر لازم باشد
         final_video_path = webm
         if video_format != "webm":
             converted = os.path.join(job_dir, f"record.{video_format}")
@@ -1381,15 +1378,13 @@ def handle_record_video(job):
             except:
                 safe_print("Video format conversion failed, keeping webm")
 
-        # ذخیره مسیرها در job.extra برای درخواست کاربر
         job.extra = {
             "video_path": final_video_path,
             "audio_path": audio_path if (audio_ok and os.path.exists(audio_path)) else None,
             "video_done": False,
-            "audio_done": not (audio_ok and os.path.exists(audio_path))  # اگر صوتی نیست خودکار تمام شود
+            "audio_done": not (audio_ok and os.path.exists(audio_path))
         }
 
-        # پرسش از کاربر: ZIP یا اصلی برای ویدیو و صوت
         kb_rows = [
             [{"text": "📦 ویدیو ZIP", "callback_data": f"rec_vidzip_{job.job_id}"},
              {"text": "📄 ویدیو اصلی", "callback_data": f"rec_vidraw_{job.job_id}"}]
@@ -1409,6 +1404,14 @@ def handle_record_video(job):
         send_message(chat_id, f"❌ خطا: {e}")
         job.status = "error"; update_job(job)
         shutil.rmtree(job_dir, ignore_errors=True)
+    finally:
+        if _rec_browser:
+            try: _rec_browser.close()
+            except: pass
+        if _rec_pw:
+            try: _rec_pw.stop()
+            except: pass
+
 # ═══════════════════════ تشخیص موقعیت ویدیو ═══════════════════════
 def find_video_center(page):
     coords = page.evaluate("""() => {
@@ -1792,12 +1795,12 @@ def admin_panel(chat_id):
         ]}
         send_message(chat_id, msg, reply_markup=kb)
     except Exception as e: send_message(chat_id, f"❌ خطا در دریافت اطلاعات: {e}")
+
 # ═══════════════════════ مدیریت پیام و Callback (با ویرایش پیام) ═══════════════════════
 def handle_message(chat_id, text):
     session = get_session(chat_id)
     text = text.strip()
 
-    # 💀 دستور /kill – اولویت مطلق
     if text == "/kill":
         if not session.is_pro and not session.is_admin:
             send_message(chat_id, "⛔ دسترسی غیرمجاز.")
@@ -1818,7 +1821,6 @@ def handle_message(chat_id, text):
                      reply_markup=main_menu_keyboard(session.is_admin, session.subscription))
         return
 
-    # 🛑 بررسی خاموشی نرم (Soft Shutdown)
     if is_service_disabled() and not session.is_admin:
         if text == "/start":
             session.state = "idle"; session.click_counter = 0; set_session(session)
@@ -1843,7 +1845,6 @@ def handle_message(chat_id, text):
                          reply_markup=main_menu_keyboard(session.is_admin, session.subscription))
         return
 
-    # 👑 دستورات ادمین
     if session.is_admin:
         if text.startswith("/addcode "):
             parts = text.split()
@@ -1872,7 +1873,6 @@ def handle_message(chat_id, text):
             send_message(chat_id, f"🔄 وضعیت سرویس: **{status}**")
             return
 
-    # ⏱️ دستور /status
     if text == "/status":
         if not session.is_pro and not session.is_admin:
             send_message(chat_id, "⛔ دسترسی غیرمجاز.")
@@ -1967,7 +1967,6 @@ def handle_message(chat_id, text):
                 session.state = "idle"
                 set_session(session)
                 send_message(chat_id, f"⏱️ زمان ضبط روی {val} ثانیه تنظیم شد.")
-                # ویرایش کیبورد تنظیمات به‌جای پیام جدید
                 if session.last_settings_msg_id:
                     edit_message_reply_markup(chat_id, session.last_settings_msg_id,
                                               settings_keyboard(session.settings))
@@ -1993,7 +1992,7 @@ def handle_message(chat_id, text):
             send_message(chat_id, "🛑 صف پردازش پر است (حداکثر ۲). لطفاً کمی صبر کنید یا /kill را بزنید.")
             return
         if mode == "record_video":
-            enqueue_record(job)  # ★ صف مجزای ضبط
+            enqueue_record(job)
         else:
             enqueue(job)
         session.state = "idle"; session.current_job_id = job.job_id
@@ -2067,7 +2066,6 @@ def handle_callback(cq):
         session.click_counter += 1
         set_session(session)
 
-    # منوی اصلی
     if data == "menu_screenshot":
         session.state = "waiting_url_screenshot"; set_session(session); send_message(chat_id, "📸 URL:")
     elif data == "menu_download":
@@ -2098,7 +2096,6 @@ def handle_callback(cq):
             admin_panel(chat_id)
         else: answer_callback_query(cid, "دسترسی غیرمجاز")
 
-    # تنظیمات (ویرایش کیبورد)
     elif data == "set_rec":
         session.state = "waiting_record_time"; set_session(session)
         send_message(chat_id, "⏱️ زمان ضبط را به ثانیه وارد کنید (۱ تا ۱۸۰۰):")
@@ -2107,7 +2104,6 @@ def handle_callback(cq):
     elif data == "back_main":
         send_message(chat_id, "منوی اصلی:", reply_markup=main_menu_keyboard(session.is_admin, session.subscription))
 
-    # اسکرین‌شات‌های چندمرحله‌ای
     elif data.startswith("req2x_"):
         jid = data[6:]; job = find_job(jid)
         if job and job.status == "done":
@@ -2117,7 +2113,6 @@ def handle_callback(cq):
         if job and job.status == "done":
             enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="4k_screenshot", url=job.url))
 
-    # دانلود ZIP/اصلی
     elif data.startswith("dlzip_") or data.startswith("dlraw_"):
         jid = data[6:] if data.startswith("dlzip_") else data[6:]; job = find_job(jid)
         if job and job.extra:
@@ -2129,7 +2124,6 @@ def handle_callback(cq):
             job.extra["pack_zip"] = data.startswith("dlblindzip_"); job.status = "done"; update_job(job)
             enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="download_execute", url=job.url, extra=job.extra))
 
-    # ★ دریافت ویدیو/صوت ضبط‌شده (ZIP یا اصلی)
     elif data.startswith("rec_vidzip_") or data.startswith("rec_vidraw_"):
         jid = data[10:] if data.startswith("rec_vidzip_") else data[10:]
         job = find_job(jid)
@@ -2152,7 +2146,6 @@ def handle_callback(cq):
         if job: job.status = "cancelled"; update_job(job)
         send_message(chat_id, "❌ لغو شد.", reply_markup=main_menu_keyboard(session.is_admin, session.subscription))
 
-    # ناوبری مرورگر
     elif data.startswith("nav_"):
         parts = data.split("_", 2)
         if len(parts) >= 3:
@@ -2172,16 +2165,13 @@ def handle_callback(cq):
                     enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="download", url=url))
                 else: answer_callback_query(cid, "🛑 صف پر است.")
 
-    # اسکن ویدیوها / جستجوی فایل‌ها / استخراج فرامین
     elif data.startswith("scvid_"): enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="scan_videos", url=""))
     elif data.startswith("scdl_"): enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="scan_downloads", url=""))
     elif data.startswith("extcmd_"): enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="extract_commands", url=""))
 
-    # تحلیل هوشمند و تحلیل سورس (Explorer)
     elif data.startswith("sman_"): enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="smart_analyze", url=""))
     elif data.startswith("srcan_"): enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="source_analyze", url=""))
 
-    # ضبط ویدیو
     elif data.startswith("recvid_"):
         if session.settings.record_behavior == "live":
             session.state = "waiting_live_command"; set_session(session)
@@ -2191,14 +2181,12 @@ def handle_callback(cq):
                 enqueue_record(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="record_video", url=session.browser_url))
             else: answer_callback_query(cid, "🛑 صف پر است.")
 
-    # دانلود سایت
     elif data.startswith("dlweb_"):
         if session.browser_url:
             if session.is_admin or count_user_jobs(chat_id) < 2:
                 enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="download_website", url=session.browser_url))
             else: answer_callback_query(cid, "🛑 صف پر است.")
 
-    # صفحه‌بندی مرورگر / نتایج دانلود
     elif data.startswith("bpg_"):
         parts = data.split("_")
         if len(parts) == 3:
@@ -2213,11 +2201,9 @@ def handle_callback(cq):
         session.found_downloads = None; session.found_downloads_page = 0; set_session(session)
         send_message(chat_id, "📦 نتایج جستجو بسته شد.", reply_markup=main_menu_keyboard(session.is_admin, session.subscription))
 
-    # دانلود همه فایل‌ها
     elif data.startswith("dlall_"):
         enqueue(Job(job_id=str(uuid.uuid4()), chat_id=chat_id, mode="download_all_found", url=""))
 
-    # مسدودساز تبلیغات
     elif data.startswith("adblock_"):
         parsed_url = urlparse(session.browser_url or "")
         current_domain = parsed_url.netloc.lower()
@@ -2234,7 +2220,6 @@ def handle_callback(cq):
         set_session(session)
         send_browser_page(chat_id, page_num=session.browser_page)
 
-    # بستن مرورگر
     elif data.startswith("closebrowser_"):
         close_user_context(chat_id); session.state = "idle"; session.click_counter = 0; set_session(session)
         send_message(chat_id, "🧭 بسته شد.", reply_markup=main_menu_keyboard(session.is_admin, session.subscription))
@@ -2243,7 +2228,6 @@ def handle_callback(cq):
         answer_callback_query(cid)
 
 def _settings_toggle(chat_id, session, data, cid):
-    """تغییر تنظیمات و ویرایش کیبورد موجود"""
     if data == "set_dlmode":
         session.settings.default_download_mode = "stream" if session.settings.default_download_mode == "store" else "store"
     elif data == "set_brwmode":
@@ -2269,14 +2253,12 @@ def _settings_toggle(chat_id, session, data, cid):
         session.settings.incognito_mode = not session.settings.incognito_mode
     set_session(session)
     answer_callback_query(cid, "✅ تنظیم شد.")
-    # ویرایش کیبورد به‌جای ارسال پیام جدید
     if session.last_settings_msg_id:
         edit_message_reply_markup(chat_id, session.last_settings_msg_id, settings_keyboard(session.settings))
     else:
         send_message(chat_id, "⚙️ تنظیمات:", reply_markup=settings_keyboard(session.settings))
 
 def _send_recorded_file(chat_id, job, file_type, zip_mode):
-    """ارسال فایل ضبط‌شده (ویدیو یا صوت) با توجه به انتخاب ZIP/اصلی"""
     path = job.extra.get("video_path") if file_type == "video" else job.extra.get("audio_path")
     if not path or not os.path.exists(path):
         send_message(chat_id, f"❌ فایل {file_type} یافت نشد.")
@@ -2284,7 +2266,6 @@ def _send_recorded_file(chat_id, job, file_type, zip_mode):
 
     fname = os.path.basename(path)
     if zip_mode:
-        # ساخت ZIP
         d = os.path.dirname(path) or "."
         zp = os.path.join(d, f"{fname}.zip")
         with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -2326,13 +2307,11 @@ def polling_loop(stop_event):
 def main():
     os.makedirs("jobs_data", exist_ok=True)
     stop_event = threading.Event()
-    # Workerهای عمومی (0 و 1)
     for i in range(2):
         threading.Thread(target=worker_loop, args=(i, stop_event, "general"), daemon=True).start()
-    # Worker ضبط (2)
     threading.Thread(target=worker_loop, args=(2, stop_event, "record"), daemon=True).start()
     threading.Thread(target=polling_loop, args=(stop_event,), daemon=True).start()
-    safe_print("✅ Bot20 Ultimate Pro اجرا شد")
+    safe_print("✅ Bot20 Ultimate Pro (Thread-safe) اجرا شد")
     try:
         while True: time.sleep(1)
     except KeyboardInterrupt: stop_event.set()
