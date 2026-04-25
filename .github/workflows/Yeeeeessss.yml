@@ -1,14 +1,17 @@
-name: Yoooooo
+name: K (5h55m runtime, 6h cycle)
 
 on:
-  workflow_dispatch:
+  schedule:
+    # هر ۶ ساعت یکبار (UTC)
+    - cron: '0 */6 * * *'
+  workflow_dispatch:   # دستی هم قابل اجراست
   push:
     branches: [ "main" ]
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 355
+    timeout-minutes: 355   # 5 ساعت و 55 دقیقه
 
     steps:
       - name: Checkout repository
@@ -19,25 +22,16 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install system dependencies (PulseAudio + ffmpeg)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pulseaudio pulseaudio-utils ffmpeg
-
-      - name: Load snd-aloop kernel module (for audio capture)
-        run: |
-          sudo modprobe snd-aloop || true
-
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests playwright beautifulsoup4 playwright-stealth
+          pip install requests playwright beautifulsoup4
 
-      - name: Install Playwright Chromium
+      - name: Install Playwright browsers
         run: |
           python -m playwright install chromium
 
-      - name: Run bot
+      - name: Run bot (auto-exit after 355 min)
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
         run: |
