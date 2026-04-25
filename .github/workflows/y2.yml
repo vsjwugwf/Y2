@@ -1,8 +1,6 @@
-name: Bale Bot Runner (5h55m runtime, 6h cycle)
+name: Bale Bot v21 Finalllllll
 
 on:
-  schedule:
-    - cron: '0 */6 * * *'
   workflow_dispatch:
   push:
     branches: [ "main" ]
@@ -21,30 +19,30 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install system dependencies for Playwright
+      - name: Install System Dependencies (Audio, Video & ALSA)
         run: |
           sudo apt-get update
-          sudo apt-get install -y libnss3 libnspr4 libatk-bridge2.0-0 libatk1.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2
+          # نصب برنامه‌های مدیریت صدا و ویدیو که ربات شما نیاز دارد
+          sudo apt-get install -y ffmpeg pulseaudio alsa-utils kmod
+          # تلاش برای فعال کردن کارت صدای مجازی (ممکن است در ماشین مجازی محدود باشد)
+          sudo modprobe snd-aloop || echo "Warning: snd-aloop module could not be loaded."
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests playwright beautifulsoup4
+          # اضافه شدن playwright-stealth به لیست نصب
+          pip install requests playwright beautifulsoup4 yt-dlp playwright-stealth
 
-      - name: Install Playwright browsers
+      - name: Install Playwright Chromium & Dependencies
         run: |
-          python -m playwright install chromium --with-deps
+          python -m playwright install chromium
+          python -m playwright install-deps chromium
 
-      - name: Run bot (auto-exit after 355 min)
+      - name: Run bot
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
         run: |
-          python bot.py 2>&1 | tee bot.log
-          exit ${PIPESTATUS[0]}
-
-      - name: Upload log on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: bot-log
-          path: bot.log
+          # استارت کردن سرویس صدا قبل از اجرای ربات
+          pulseaudio --start || true
+          python bot.py
+          
